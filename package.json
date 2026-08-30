@@ -1,0 +1,46 @@
+{
+  "name": "company-logo",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@fontsource/anton": "^5.3.0",
+    "@fontsource/archivo-black": "^5.3.0",
+    "@fontsource/bangers": "^5.3.0",
+    "@fontsource/bebas-neue": "^5.2.5",
+    "@fontsource/comfortaa": "^5.3.0",
+    "@fontsource/dm-serif-display": "^5.3.0",
+    "@fontsource/josefin-sans": "^5.3.0",
+    "@fontsource/lobster": "^5.3.0",
+    "@fontsource/ma-shan-zheng": "^5.3.1",
+    "@fontsource/montserrat": "^5.2.5",
+    "@fontsource/oswald": "^5.3.0",
+    "@fontsource/outfit": "^5.2.5",
+    "@fontsource/pacifico": "^5.2.5",
+    "@fontsource/playfair-display": "^5.3.0",
+    "@fontsource/poppins": "^5.3.0",
+    "@fontsource/raleway": "^5.3.0",
+    "@fontsource/righteous": "^5.3.0",
+    "@fontsource/rubik": "^5.3.0",
+    "@fontsource/source-sans-3": "^5.2.5",
+    "@fontsource/space-grotesk": "^5.3.0",
+    "@fontsource/zcool-kuaile": "^5.3.0",
+    "fabric": "^6.6.1",
+    "opentype.js": "^1.3.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/opentype.js": "^1.3.8",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "~5.7.2",
+    "vite": "^6.2.0"
+  }
+}
