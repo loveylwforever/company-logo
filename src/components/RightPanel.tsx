@@ -9,10 +9,11 @@ type Props = {
   selectedIds: string[]
 }
 
-type SectionId = 'props' | 'gradient' | 'shadow' | 'layers' | 'export'
+type SectionId = 'props' | 'path' | 'gradient' | 'shadow' | 'layers' | 'export'
 
 const DEFAULT_OPEN: Record<SectionId, boolean> = {
   props: true,
+  path: true,
   gradient: true,
   shadow: true,
   layers: true,
@@ -185,32 +186,73 @@ export function RightPanel({ selection, layers, selectedIds }: Props) {
                 />
               </div>
             )}
-            <div className="toolbar-group">
-              {s.isText && (
-                <button type="button" className="primary" onClick={() => void controller.convertTextToPath()}>
-                  转为路径
-                </button>
-              )}
-              {s.isPath && !s.pathEditing && (
-                <button type="button" className="primary" onClick={() => controller.startPathEdit()}>
-                  编辑路径
-                </button>
-              )}
-              {s.pathEditing && (
-                <button type="button" className="primary" onClick={() => controller.stopPathEdit()}>
-                  完成变形
-                </button>
-              )}
-              <button type="button" className="danger" onClick={() => controller.deleteSelected()}>
-                删除
-              </button>
-            </div>
-            {s.pathEditing && (
-              <p className="muted">实心点为锚点，空心点为控制柄；拖拽变形后点「完成变形」</p>
-            )}
           </>
         )}
       </AccordionSection>
+
+      {hasSelection && s && (s.isText || s.isPath || s.pathEditing) && (
+        <AccordionSection title="路径变形" open={open.path} onToggle={() => toggle('path')}>
+          <div className={`path-feature${s.pathEditing ? ' is-editing' : ''}`}>
+            <div className="path-feature-top">
+              <span className="path-feature-mark" aria-hidden>
+                <svg viewBox="0 0 40 28" width="40" height="28" fill="none">
+                  <path
+                    d="M4 20 C10 6 16 6 22 14 C26 20 30 22 36 12"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                  />
+                  <circle cx="4" cy="20" r="2.6" fill="currentColor" />
+                  <circle cx="22" cy="14" r="2.6" fill="currentColor" />
+                  <circle cx="36" cy="12" r="2.6" fill="#fff" stroke="currentColor" strokeWidth="1.6" />
+                </svg>
+              </span>
+              <div className="path-feature-copy">
+                <span className="path-feature-badge">{s.pathEditing ? '编辑中' : '特色能力'}</span>
+                <strong className="path-feature-title">
+                  {s.pathEditing ? '拖拽锚点自由变形' : s.isText ? '文字变矢量，随心塑形' : '锚点级路径雕塑'}
+                </strong>
+              </div>
+            </div>
+            <p className="path-feature-desc">
+              {s.pathEditing
+                ? '实心点为锚点，空心点为控制柄。调完后点下方完成，结果可继续上色与导出。'
+                : s.isText
+                  ? '先转为路径，再用锚点拉出专属字形轮廓——Logo 差异化的关键一步。'
+                  : '进入编辑后拖动锚点与控制柄，精细调整轮廓，做出独一无二的标志形态。'}
+            </p>
+            <div className="path-feature-actions">
+              {s.isText && (
+                <button
+                  type="button"
+                  className="path-feature-cta"
+                  onClick={() => void controller.convertTextToPath()}
+                >
+                  转为路径并变形
+                </button>
+              )}
+              {s.isPath && !s.pathEditing && (
+                <button
+                  type="button"
+                  className="path-feature-cta"
+                  onClick={() => controller.startPathEdit()}
+                >
+                  开始编辑路径
+                </button>
+              )}
+              {s.pathEditing && (
+                <button
+                  type="button"
+                  className="path-feature-cta is-done"
+                  onClick={() => controller.stopPathEdit()}
+                >
+                  完成变形
+                </button>
+              )}
+            </div>
+          </div>
+        </AccordionSection>
+      )}
 
       {canStyle && s && (
         <>
