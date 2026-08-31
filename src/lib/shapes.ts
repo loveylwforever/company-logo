@@ -19,6 +19,7 @@ export type ShapeKind =
   | 'parallelogram'
   | 'teardrop'
   | 'leaf'
+  | 'blob'
 
 export type ShapeMeta = {
   id: ShapeKind
@@ -27,14 +28,16 @@ export type ShapeMeta = {
   strokeOnly?: boolean
   /** 镂空用 evenodd */
   evenOdd?: boolean
+  /** 支持属性面板调节圆角 */
+  cornerRadius?: boolean
 }
 
 export const SHAPE_META: ShapeMeta[] = [
   { id: 'circle', label: '圆' },
   { id: 'oval', label: '椭圆' },
-  { id: 'rect', label: '方' },
-  { id: 'rounded', label: '圆角' },
-  { id: 'pill', label: '胶囊' },
+  { id: 'rect', label: '方', cornerRadius: true },
+  { id: 'rounded', label: '圆角', cornerRadius: true },
+  { id: 'pill', label: '胶囊', cornerRadius: true },
   { id: 'triangle', label: '三角' },
   { id: 'diamond', label: '菱形' },
   { id: 'pentagon', label: '五边' },
@@ -49,11 +52,44 @@ export const SHAPE_META: ShapeMeta[] = [
   { id: 'parallelogram', label: '斜方' },
   { id: 'teardrop', label: '水滴' },
   { id: 'leaf', label: '叶片' },
+  { id: 'blob', label: '柔体' },
   { id: 'line', label: '直线', strokeOnly: true },
 ]
 
 export function getShapeMeta(kind: ShapeKind): ShapeMeta {
   return SHAPE_META.find((s) => s.id === kind) ?? SHAPE_META[0]
+}
+
+export function shapeSupportsCornerRadius(kind: string | undefined): boolean {
+  if (!kind) return false
+  return Boolean(getShapeMeta(kind as ShapeKind).cornerRadius)
+}
+
+/** 路径本地单位下的默认圆角 */
+export function defaultCornerRadius(kind: ShapeKind, size: number): number {
+  switch (kind) {
+    case 'rounded':
+      return Math.min(28, size / 2)
+    case 'pill':
+      return size / 2
+    default:
+      return 0
+  }
+}
+
+function roundedRectPath(s: number, r: number): string {
+  const rad = Math.max(0, Math.min(r, s / 2))
+  if (rad <= 0) return `M 0 0 H ${s} V ${s} H 0 Z`
+  return (
+    `M ${rad} 0 H ${s - rad} ` +
+    `A ${rad} ${rad} 0 0 1 ${s} ${rad} ` +
+    `V ${s - rad} ` +
+    `A ${rad} ${rad} 0 0 1 ${s - rad} ${s} ` +
+    `H ${rad} ` +
+    `A ${rad} ${rad} 0 0 1 0 ${s - rad} ` +
+    `V ${rad} ` +
+    `A ${rad} ${rad} 0 0 1 ${rad} 0 Z`
+  )
 }
 
 function regularPolygon(cx: number, cy: number, r: number, sides: number, rotation = -Math.PI / 2): string {
@@ -75,7 +111,7 @@ function starPath(cx: number, cy: number, outer: number, inner: number, points =
   return `M ${pts.join(' L ')} Z`
 }
 
-export function shapePath(kind: ShapeKind, size = 180): string {
+export function shapePath(kind: ShapeKind, size = 180, cornerRadius?: number): string {
   const s = size
   const c = s / 2
   switch (kind) {
@@ -87,14 +123,10 @@ export function shapePath(kind: ShapeKind, size = 180): string {
       return `M ${c} ${c - ry} A ${rx} ${ry} 0 1 1 ${c} ${c + ry} A ${rx} ${ry} 0 1 1 ${c} ${c - ry} Z`
     }
     case 'rect':
-      return `M 0 0 H ${s} V ${s} H 0 Z`
-    case 'rounded': {
-      const r = 28
-      return `M ${r} 0 H ${s - r} Q ${s} 0 ${s} ${r} V ${s - r} Q ${s} ${s} ${s - r} ${s} H ${r} Q 0 ${s} 0 ${s - r} V ${r} Q 0 0 ${r} 0 Z`
-    }
+    case 'rounded':
     case 'pill': {
-      const r = s / 2
-      return `M ${r} 0 H ${s - r} A ${r} ${r} 0 0 1 ${s - r} ${s} H ${r} A ${r} ${r} 0 0 1 ${r} 0 Z`
+      const r = cornerRadius ?? defaultCornerRadius(kind, s)
+      return roundedRectPath(s, r)
     }
     case 'triangle':
       return `M ${c} 8 L ${s - 8} ${s - 8} L 8 ${s - 8} Z`
@@ -151,6 +183,16 @@ export function shapePath(kind: ShapeKind, size = 180): string {
         `M ${c} 10 ` +
         `Q ${s - 10} ${c * 0.7} ${c} ${s - 10} ` +
         `Q 10 ${c * 0.7} ${c} 10 Z`
+      )
+    }
+    case 'blob': {
+      // 有机柔体：圆角贝塞尔闭合，便于路径锚点微调
+      return (
+        `M ${c} ${s * 0.08} ` +
+        `C ${s * 0.78} ${s * 0.08} ${s * 0.96} ${s * 0.32} ${s * 0.92} ${c} ` +
+        `C ${s * 0.96} ${s * 0.72} ${s * 0.72} ${s * 0.96} ${c} ${s * 0.9} ` +
+        `C ${s * 0.28} ${s * 0.96} ${s * 0.04} ${s * 0.7} ${s * 0.1} ${c} ` +
+        `C ${s * 0.04} ${s * 0.3} ${s * 0.28} ${s * 0.08} ${c} ${s * 0.08} Z`
       )
     }
     case 'line':

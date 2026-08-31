@@ -1,11 +1,11 @@
 import { Point, type Canvas, type FabricObject, type TMat2D } from 'fabric'
-import { PathEditor } from './pathEditor'
+import { isOverlayObject } from './overlay'
 
 /** 接近中心时显示黄线的容差（场景坐标） */
 const SHOW_EPS = 5
 
 function isSkippable(obj: FabricObject) {
-  return PathEditor.isAnchorObject(obj) || obj.visible === false
+  return isOverlayObject(obj) || obj.visible === false
 }
 
 type GuideLine = { orientation: 'v' | 'h'; position: number }

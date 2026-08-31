@@ -17,6 +17,8 @@ npm install
 npm run dev
 ```
 
+> 用 **npm**（不要用 pnpm）。`package.json` 里用 `overrides` 替换了 fabric 仅供 Node 的可选依赖 `canvas`/`jsdom`，避免安装告警；浏览器运行不需要它们。
+
 ## 构建
 
 ```bash

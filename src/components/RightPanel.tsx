@@ -161,6 +161,18 @@ export function RightPanel({ selection, layers, selectedIds }: Props) {
                 />
               </div>
             </div>
+            {s.supportsCornerRadius && (
+              <div className="field">
+                <label>圆角 (px)</label>
+                <DimInput
+                  key={`r-${selectedIds.join(',')}`}
+                  value={s.cornerRadius ?? 0}
+                  min={0}
+                  max={Math.max(0, Math.floor(Math.min(s.width, s.height) / 2))}
+                  onCommit={(n) => controller.updateProps({ cornerRadius: n })}
+                />
+              </div>
+            )}
             {s.isText && (
               <div className="field">
                 <label>字号</label>
@@ -194,7 +206,7 @@ export function RightPanel({ selection, layers, selectedIds }: Props) {
               </button>
             </div>
             {s.pathEditing && (
-              <p className="muted">拖拽绿色锚点变形；完成后点「完成变形」</p>
+              <p className="muted">实心点为锚点，空心点为控制柄；拖拽变形后点「完成变形」</p>
             )}
           </>
         )}
@@ -216,9 +228,10 @@ export function RightPanel({ selection, layers, selectedIds }: Props) {
               >
                 纯色
               </button>
-              <button
+                <button
                 type="button"
                 className={s.fillMode === 'linear' ? 'active' : ''}
+                title="直线方向渐变：两端可自由摆放"
                 onClick={() => patchGrad({ mode: 'linear' })}
               >
                 线性
@@ -226,6 +239,7 @@ export function RightPanel({ selection, layers, selectedIds }: Props) {
               <button
                 type="button"
                 className={s.fillMode === 'radial' ? 'active' : ''}
+                title="从中心向外扩散的圆形渐变"
                 onClick={() => patchGrad({ mode: 'radial' })}
               >
                 径向
@@ -251,20 +265,6 @@ export function RightPanel({ selection, layers, selectedIds }: Props) {
                     />
                   </div>
                 </div>
-                {s.fillMode === 'linear' && (
-                  <div className="field">
-                    <label>角度 {s.gradientAngle}°</label>
-                    <input
-                      type="range"
-                      min={0}
-                      max={360}
-                      value={s.gradientAngle}
-                      onChange={(e) =>
-                        patchGrad({ mode: 'linear', angle: Number(e.target.value) })
-                      }
-                    />
-                  </div>
-                )}
                 <div
                   className="gradient-preview"
                   style={{
@@ -274,6 +274,11 @@ export function RightPanel({ selection, layers, selectedIds }: Props) {
                         : `linear-gradient(${s.gradientAngle}deg, ${s.gradientColor1}, ${s.gradientColor2})`,
                   }}
                 />
+                <p className="muted">
+                  {s.fillMode === 'linear'
+                    ? `拖两端改方向与过渡；拖中点挪线。切换线性/径向会分别记住布局（${s.gradientAngle}°）`
+                    : '拖中心点移焦点，拖外点改半径'}
+                </p>
               </>
             )}
           </AccordionSection>

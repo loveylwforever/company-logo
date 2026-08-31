@@ -1,7 +1,7 @@
 import {
   Canvas,
   FabricObject,
-  Gradient,
+  Group,
   IText,
   Path,
   Point,
@@ -10,9 +10,27 @@ import {
   type FabricObjectProps,
 } from 'fabric'
 import { textToPathData, getFontOption, type FontOption } from './fonts'
-import { shapePath, type ShapeKind, SHAPE_META, getShapeMeta } from './shapes'
+import {
+  shapePath,
+  type ShapeKind,
+  SHAPE_META,
+  getShapeMeta,
+  shapeSupportsCornerRadius,
+  defaultCornerRadius,
+} from './shapes'
 import { HistoryStack, serializeCanvas } from './history'
 import { PathEditor } from './pathEditor'
+import { GradientEditor } from './gradientEditor'
+import {
+  createGradientFill,
+  optionsFromParsed,
+  parseObjectGradient,
+  rememberObjectGradient,
+  resolveGradientForMode,
+  type FillMode,
+  type GradMemory,
+} from './fills'
+import { isOverlayObject } from './overlay'
 import {
   downloadBlob,
   dataUrlToArrayBuffer,
@@ -22,8 +40,17 @@ import {
 import { getPalette, type Palette, DEFAULT_PALETTE_ID } from './palettes'
 import { AlignGuideManager } from './alignGuides'
 
+export type { FillMode } from './fills'
+
 /** 持久化自定义元数据，保证撤销后容器仍可识别 */
-FabricObject.customProperties = ['__uid', '__label', '__role', '__fontId']
+FabricObject.customProperties = [
+  '__uid',
+  '__label',
+  '__role',
+  '__fontId',
+  '__cornerRadius',
+  '__gradMemory',
+]
 
 /** 默认 Logo 容器边长 */
 export const DEFAULT_CONTAINER_SIZE = 512
@@ -39,8 +66,6 @@ export type LayerInfo = {
   locked: boolean
   isContainer?: boolean
 }
-
-export type FillMode = 'solid' | 'linear' | 'radial'
 
 export type SelectionProps = {
   fill: string
@@ -65,6 +90,9 @@ export type SelectionProps = {
   shadowBlur: number
   shadowOffsetX: number
   shadowOffsetY: number
+  /** 形状圆角（路径本地 px）；不支持时为 undefined */
+  cornerRadius?: number
+  supportsCornerRadius?: boolean
 }
 
 type Listeners = {
@@ -88,6 +116,8 @@ type MetaObject = FabricObject & {
   __label?: string
   __role?: string
   __fontId?: string
+  __cornerRadius?: number
+  __gradMemory?: GradMemory
 }
 
 function objId(obj: FabricObject): string {
@@ -120,51 +150,13 @@ function displayName(obj: FabricObject): string {
   if (obj instanceof IText) return obj.text?.slice(0, 12) || '文字'
   const custom = (obj as MetaObject).__label
   if (custom) {
+    if (custom.startsWith('组合')) return custom
     const meta = SHAPE_META.find((s) => s.id === custom)
     return meta?.label ?? custom
   }
+  if (obj instanceof Group) return '组合'
   if (obj instanceof Path) return '路径'
   return obj.type || '对象'
-}
-
-function angleToLinearCoords(angleDeg: number) {
-  const rad = (angleDeg * Math.PI) / 180
-  const cos = Math.cos(rad)
-  const sin = Math.sin(rad)
-  return {
-    x1: 0.5 - cos * 0.5,
-    y1: 0.5 - sin * 0.5,
-    x2: 0.5 + cos * 0.5,
-    y2: 0.5 + sin * 0.5,
-  }
-}
-
-function createGradientFill(
-  mode: 'linear' | 'radial',
-  c1: string,
-  c2: string,
-  angle = 90,
-) {
-  if (mode === 'radial') {
-    return new Gradient({
-      type: 'radial',
-      gradientUnits: 'percentage',
-      coords: { x1: 0.5, y1: 0.5, r1: 0, x2: 0.5, y2: 0.5, r2: 0.65 },
-      colorStops: [
-        { offset: 0, color: c1 },
-        { offset: 1, color: c2 },
-      ],
-    })
-  }
-  return new Gradient({
-    type: 'linear',
-    gradientUnits: 'percentage',
-    coords: angleToLinearCoords(angle),
-    colorStops: [
-      { offset: 0, color: c1 },
-      { offset: 1, color: c2 },
-    ],
-  })
 }
 
 function readStyleProps(obj: FabricObject): Pick<
@@ -189,17 +181,14 @@ function readStyleProps(obj: FabricObject): Pick<
 
   if (typeof fill === 'string') {
     fillStr = fill || '#000000'
-  } else if (fill && typeof fill === 'object' && 'colorStops' in fill) {
-    const g = fill as Gradient<'linear' | 'radial'>
-    fillMode = g.type === 'radial' ? 'radial' : 'linear'
-    const stops = [...(g.colorStops || [])].sort((a, b) => a.offset - b.offset)
-    if (stops[0]?.color) gradientColor1 = String(stops[0].color)
-    if (stops[stops.length - 1]?.color) gradientColor2 = String(stops[stops.length - 1].color)
-    fillStr = gradientColor1
-    if (g.type === 'linear' && g.coords) {
-      const c = g.coords as { x1: number; y1: number; x2: number; y2: number }
-      gradientAngle = Math.round((Math.atan2(c.y2 - c.y1, c.x2 - c.x1) * 180) / Math.PI)
-      if (gradientAngle < 0) gradientAngle += 360
+  } else {
+    const g = parseObjectGradient(obj)
+    if (g) {
+      fillMode = g.mode
+      gradientColor1 = g.c1
+      gradientColor2 = g.c2
+      gradientAngle = g.angle || 90
+      fillStr = g.c1
     }
   }
 
@@ -275,6 +264,7 @@ export class LogoController {
   canvas: Canvas | null = null
   history = new HistoryStack()
   pathEditor: PathEditor | null = null
+  gradientEditor: GradientEditor | null = null
   alignGuides: AlignGuideManager | null = null
   currentFontId = 'outfit'
   currentPaletteId = DEFAULT_PALETTE_ID
@@ -305,18 +295,46 @@ export class LogoController {
     this.canvas = canvas
     this.pathEditor = new PathEditor(canvas)
     this.pathEditor.setOnChange(() => this.scheduleSave())
-    this.alignGuides = new AlignGuideManager(canvas)
-
-    canvas.on('selection:created', () => this.emitSelection())
-    canvas.on('selection:updated', () => this.emitSelection())
-    canvas.on('selection:cleared', () => this.emitSelection())
-    canvas.on('object:modified', () => {
+    this.gradientEditor = new GradientEditor(canvas)
+    this.gradientEditor.setOnChange(() => {
+      const t = this.gradientEditor?.activeTarget
+      if (t) rememberObjectGradient(t)
       this.scheduleSave()
       this.emitSelection()
     })
-    canvas.on('object:scaling', () => this.emitSelection())
+    this.alignGuides = new AlignGuideManager(canvas)
+
+    const onSelect = () => {
+      this.syncGradientEditor()
+      this.emitSelection()
+    }
+    canvas.on('selection:created', onSelect)
+    canvas.on('selection:updated', onSelect)
+    canvas.on('selection:cleared', () => {
+      this.gradientEditor?.clear()
+      this.emitSelection()
+    })
+
+    const refreshGradIfContent = (target?: FabricObject) => {
+      if (target && !isOverlayObject(target)) this.gradientEditor?.refresh()
+    }
+    canvas.on('object:modified', (e) => {
+      refreshGradIfContent(e.target)
+      this.scheduleSave()
+      this.emitSelection()
+    })
+    canvas.on('object:scaling', (e) => {
+      refreshGradIfContent(e.target)
+      this.emitSelection()
+    })
+    canvas.on('object:rotating', (e) => refreshGradIfContent(e.target))
+    canvas.on('object:moving', (e) => {
+      if (e.target && e.target === this.gradientEditor?.activeTarget) {
+        this.gradientEditor?.refresh()
+      }
+    })
     canvas.on('object:added', (e) => {
-      if (e.target && !PathEditor.isAnchorObject(e.target)) {
+      if (e.target && !isOverlayObject(e.target)) {
         ensureId(e.target)
         this.emitLayers()
         this.emitCount()
@@ -455,7 +473,7 @@ export class LogoController {
     const pathEditing = Boolean(this.pathEditor?.isEditing)
     let locked = false
 
-    if (!PathEditor.isAnchorObject(target)) {
+    if (!isOverlayObject(target)) {
       const active = canvas.getActiveObjects()
       if (!active.some((o) => o === target)) {
         canvas.setActiveObject(target)
@@ -504,15 +522,38 @@ export class LogoController {
     this.endRightButton()
     this.alignGuides?.clear()
     this.alignGuides = null
+    this.gradientEditor?.clear()
+    this.gradientEditor = null
     this.pathEditor?.clear()
     this.canvas?.dispose()
     this.canvas = null
     this.pathEditor = null
   }
 
+  private syncGradientEditor() {
+    if (!this.canvas || !this.gradientEditor) return
+    if (this.pathEditor?.isEditing) {
+      this.gradientEditor.clear()
+      return
+    }
+    const obj = this.canvas.getActiveObject()
+    if (obj && this.gradientEditor.owns(obj)) {
+      // 拖着手柄时保持当前目标
+      return
+    }
+    if (obj && isOverlayObject(obj)) {
+      return
+    }
+    if (!obj || obj.type === 'activeSelection' || isContainer(obj) || isStrokeOnlyShape(obj)) {
+      this.gradientEditor.clear()
+      return
+    }
+    this.gradientEditor.sync(obj)
+  }
+
   private contentObjects(): FabricObject[] {
     if (!this.canvas) return []
-    return this.canvas.getObjects().filter((o) => !PathEditor.isAnchorObject(o))
+    return this.canvas.getObjects().filter((o) => !isOverlayObject(o))
   }
 
   private containerObjects(): Rect[] {
@@ -563,6 +604,29 @@ export class LogoController {
     this.listeners?.onLayersChange(layers)
   }
 
+  private buildSelectionProps(
+    obj: FabricObject,
+    extras: Partial<SelectionProps> & Pick<SelectionProps, 'isText' | 'isPath' | 'isContainer' | 'pathEditing'>,
+  ): SelectionProps {
+    const label = (obj as MetaObject).__label
+    const supportsCorner =
+      !extras.isContainer && !extras.isText && shapeSupportsCornerRadius(label)
+    const localSize = Math.max(obj.width ?? 1, obj.height ?? 1)
+    const scale = Math.min(Math.abs(obj.scaleX || 1), Math.abs(obj.scaleY || 1)) || 1
+    const localR =
+      (obj as MetaObject).__cornerRadius ??
+      defaultCornerRadius((label || 'rect') as ShapeKind, localSize)
+    return {
+      ...selectionFields(obj),
+      ...extras,
+      fontSize: extras.isText && obj instanceof IText ? obj.fontSize : extras.fontSize,
+      fontFamily: extras.isText && obj instanceof IText ? obj.fontFamily : extras.fontFamily,
+      containerSize: extras.isContainer ? Math.round(obj.getScaledWidth()) : extras.containerSize,
+      supportsCornerRadius: supportsCorner,
+      cornerRadius: supportsCorner ? Math.round(localR * scale) : undefined,
+    }
+  }
+
   private emitSelection() {
     const canvas = this.canvas
     if (!canvas) {
@@ -572,33 +636,46 @@ export class LogoController {
     if (this.pathEditor?.isEditing) {
       const path = this.pathEditor.activePath
       if (path) {
-        this.listeners?.onSelectionChange({
-          ...selectionFields(path),
-          isText: false,
-          isPath: true,
-          isContainer: false,
-          pathEditing: true,
-        })
+        this.listeners?.onSelectionChange(
+          this.buildSelectionProps(path, {
+            isText: false,
+            isPath: true,
+            isContainer: false,
+            pathEditing: true,
+          }),
+        )
         return
       }
     }
     const obj = canvas.getActiveObject()
-    if (!obj || PathEditor.isAnchorObject(obj) || obj.type === 'activeSelection') {
+    if (!obj || isOverlayObject(obj) || obj.type === 'activeSelection') {
+      const gradTarget = this.gradientEditor?.activeTarget
+      if (gradTarget && obj && this.gradientEditor?.owns(obj)) {
+        this.listeners?.onSelectionChange(
+          this.buildSelectionProps(gradTarget, {
+            isText: false,
+            isPath: gradTarget instanceof Path && !isTextLike(gradTarget),
+            isContainer: false,
+            pathEditing: false,
+            fontSize: undefined,
+            fontFamily: undefined,
+          }),
+        )
+        return
+      }
       this.listeners?.onSelectionChange(null)
       return
     }
     const container = isContainer(obj)
     const isText = isTextLike(obj)
-    this.listeners?.onSelectionChange({
-      ...selectionFields(obj),
-      fontSize: isText && obj instanceof IText ? obj.fontSize : undefined,
-      fontFamily: isText && obj instanceof IText ? obj.fontFamily : undefined,
-      isText,
-      isPath: obj instanceof Path && !isText && !container,
-      isContainer: container,
-      pathEditing: false,
-      containerSize: container ? Math.round(obj.getScaledWidth()) : undefined,
-    })
+    this.listeners?.onSelectionChange(
+      this.buildSelectionProps(obj, {
+        isText,
+        isPath: obj instanceof Path && !isText && !container,
+        isContainer: container,
+        pathEditing: false,
+      }),
+    )
   }
 
   scheduleSave() {
@@ -675,6 +752,9 @@ export class LogoController {
       top: 64 + offset,
       width: size,
       height: size,
+      // Fabric 7 默认 origin 为 center；容器按左上角定位
+      originX: 'left',
+      originY: 'top',
       fill: 'rgba(15, 110, 86, 0.06)',
       stroke: '#0f6e56',
       strokeWidth: 2,
@@ -706,7 +786,7 @@ export class LogoController {
     const scaleBoost = drop.box ? 1 : Math.max(0.55, 1 - Math.min(shapeCount, 4) * 0.1)
     const meta = getShapeMeta(kind)
 
-    const path = new Path(shapePath(kind, base), {
+    const path = new Path(shapePath(kind, base, defaultCornerRadius(kind, base)), {
       left: drop.x,
       top: drop.y,
       originX: 'center',
@@ -721,6 +801,9 @@ export class LogoController {
       objectCaching: false,
     })
     ;(path as MetaObject).__label = kind
+    if (meta.cornerRadius) {
+      ;(path as MetaObject).__cornerRadius = defaultCornerRadius(kind, base)
+    }
     ensureId(path)
     this.canvas.add(path)
     this.canvas.setActiveObject(path)
@@ -781,7 +864,10 @@ export class LogoController {
         if (isStrokeOnlyShape(o)) {
           o.set({ fill: '', stroke: c1 })
         } else {
-          o.set('fill', createGradientFill(mode, c1, c2, angle))
+          // 套用配色时保留该对象已调过的几何（若有），只换色与模式
+          const resolved = resolveGradientForMode(o, mode, { c1, c2 }, angle)
+          o.set('fill', createGradientFill(mode, c1, c2, resolved))
+          rememberObjectGradient(o)
         }
       }
     } else {
@@ -846,10 +932,29 @@ export class LogoController {
       if (partial.fontFamily !== undefined) target.set('fontFamily', partial.fontFamily)
     }
 
+    if (partial.cornerRadius !== undefined && target instanceof Path) {
+      this.applyCornerRadius(target, partial.cornerRadius)
+    }
+
     canvas.requestRenderAll()
     this.scheduleSave()
     this.emitSelection()
     this.emitLayers()
+  }
+
+  /** 按圆角重建矩形类形状路径，保持中心与缩放。radiusPx 为画布显示像素。 */
+  private applyCornerRadius(target: Path, radiusPx: number) {
+    const kind = (target as MetaObject).__label as ShapeKind | undefined
+    if (!shapeSupportsCornerRadius(kind) || !kind) return
+    const size = Math.max(target.width ?? 1, target.height ?? 1)
+    const scale = Math.min(Math.abs(target.scaleX || 1), Math.abs(target.scaleY || 1)) || 1
+    const localR = Math.max(0, Math.min(radiusPx / scale, size / 2))
+    const center = target.getCenterPoint()
+    target._setPath(shapePath(kind, size, localR), false)
+    target.setPositionByOrigin(center, 'center', 'center')
+    ;(target as MetaObject).__cornerRadius = localR
+    target.setCoords()
+    target.dirty = true
   }
 
   private getEditTarget(): FabricObject | null {
@@ -857,7 +962,10 @@ export class LogoController {
     if (!canvas) return null
     if (this.pathEditor?.isEditing && this.pathEditor.activePath) return this.pathEditor.activePath
     const obj = canvas.getActiveObject()
-    if (!obj || PathEditor.isAnchorObject(obj)) return null
+    if (obj && this.gradientEditor?.owns(obj) && this.gradientEditor.activeTarget) {
+      return this.gradientEditor.activeTarget
+    }
+    if (!obj || isOverlayObject(obj)) return null
     return obj
   }
 
@@ -874,6 +982,7 @@ export class LogoController {
     if (isContainer(target) && opts.mode !== 'solid') return
 
     if (opts.mode === 'solid') {
+      rememberObjectGradient(target)
       const color = opts.color ?? opts.color1 ?? '#000000'
       if (isContainer(target)) {
         target.set('fill', containerFill(color))
@@ -885,6 +994,7 @@ export class LogoController {
         if (isTextLike(target)) this.currentTextColor = color
         else this.currentShapeColor = color
       }
+      this.gradientEditor?.clear()
     } else if (isStrokeOnlyShape(target)) {
       // 直线不支持渐变填充，用起点色描边
       const color = opts.color1 ?? '#0284c7'
@@ -893,13 +1003,21 @@ export class LogoController {
     } else {
       const c1 = opts.color1 ?? '#0284c7'
       const c2 = opts.color2 ?? '#7dd3fc'
-      target.set('fill', createGradientFill(opts.mode, c1, c2, opts.angle ?? 90))
+      const current = parseObjectGradient(target)
+      if (current?.mode === opts.mode) {
+        target.set('fill', createGradientFill(opts.mode, c1, c2, optionsFromParsed(current)))
+      } else {
+        const options = resolveGradientForMode(target, opts.mode, { c1, c2 }, opts.angle ?? 90)
+        target.set('fill', createGradientFill(opts.mode, c1, c2, options))
+      }
+      rememberObjectGradient(target)
       this.currentShapeColor = c1
     }
 
     this.canvas.requestRenderAll()
     this.scheduleSave()
     this.emitSelection()
+    this.syncGradientEditor()
   }
 
   /** 阴影 / 外发光（offset 为 0 时偏发光） */
@@ -976,6 +1094,7 @@ export class LogoController {
     if (!canvas || !this.pathEditor) return
     const obj = canvas.getActiveObject()
     if (!(obj instanceof Path) || isContainer(obj)) return
+    this.gradientEditor?.clear()
     this.pathEditor.start(obj)
     this.emitSelection()
   }
@@ -991,6 +1110,7 @@ export class LogoController {
     this.saveHistory()
     this.emitSelection()
     this.emitLayers()
+    this.syncGradientEditor()
   }
 
   selectById(id: string) {
@@ -1005,7 +1125,7 @@ export class LogoController {
 
   getSelectedIds(): string[] {
     return (this.canvas?.getActiveObjects() ?? [])
-      .filter((o) => !PathEditor.isAnchorObject(o))
+      .filter((o) => !isOverlayObject(o))
       .map(objId)
   }
 
@@ -1028,7 +1148,7 @@ export class LogoController {
   private reorder(action: 'forward' | 'backward' | 'front' | 'back') {
     const canvas = this.canvas
     const obj = canvas?.getActiveObject()
-    if (!canvas || !obj || PathEditor.isAnchorObject(obj)) return
+    if (!canvas || !obj || isOverlayObject(obj)) return
     if (action === 'forward') canvas.bringObjectForward(obj)
     else if (action === 'backward') canvas.sendObjectBackwards(obj)
     else if (action === 'front') canvas.bringObjectToFront(obj)
@@ -1040,7 +1160,7 @@ export class LogoController {
 
   toggleLock() {
     const obj = this.canvas?.getActiveObject()
-    if (!obj || PathEditor.isAnchorObject(obj)) return
+    if (!obj || isOverlayObject(obj)) return
     const locked = !(obj.lockMovementX && obj.lockMovementY)
     obj.set({
       lockMovementX: locked,
@@ -1066,7 +1186,7 @@ export class LogoController {
       this.emitAll()
       return
     }
-    const objs = canvas.getActiveObjects().filter((o) => !PathEditor.isAnchorObject(o))
+    const objs = canvas.getActiveObjects().filter((o) => !isOverlayObject(o))
     if (!objs.length) return
     canvas.discardActiveObject()
     for (const o of objs) canvas.remove(o)
@@ -1102,7 +1222,7 @@ export class LogoController {
     const cacheRestore: { obj: FabricObject; caching: boolean }[] = []
 
     for (const obj of canvas.getObjects()) {
-      if (isContainer(obj) || PathEditor.isAnchorObject(obj)) {
+      if (isContainer(obj) || isOverlayObject(obj)) {
         hidden.push({
           obj,
           visible: obj.visible !== false,

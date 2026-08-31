@@ -134,8 +134,19 @@ const GUOFENG: Palette[] = [
   make('cinnabar', '丹青', 'guofeng', '#8b1e1e', '#1a3a5c', '#f5f0e6'),
 ]
 
-/** 渐变模板 */
+/** 渐变模板（含墨色双色渐变，参考 Grok ink 135° 体系） */
 const GRADIENTS: Palette[] = [
+  makeGrad('g-ink-black', '墨黑', '#585858', '#000000', { text: '#ffffff', angle: 225 }),
+  makeGrad('g-ink-brown', '赭石', '#AE8968', '#855C36', { text: '#ffffff', angle: 225 }),
+  makeGrad('g-ink-red', '朱红', '#FF5667', '#E02135', { text: '#ffffff', angle: 225 }),
+  makeGrad('g-ink-orange', '橙焰', '#FF8838', '#E05B00', { text: '#ffffff', angle: 225 }),
+  makeGrad('g-ink-yellow', '金盏', '#FFAF38', '#E08600', { text: '#1a1208', angle: 225 }),
+  makeGrad('g-ink-green', '翠羽', '#1CCF82', '#009957', { text: '#ffffff', angle: 225 }),
+  makeGrad('g-ink-cyan', '青碧', '#58D3C5', '#00A592', { text: '#134e4a', angle: 225 }),
+  makeGrad('g-ink-blue', '霁蓝', '#459FFE', '#0E74E0', { text: '#ffffff', angle: 225 }),
+  makeGrad('g-ink-violet', '藤紫', '#B792FE', '#804EE0', { text: '#ffffff', angle: 225 }),
+  makeGrad('g-ink-magenta', '洋红', '#FF77BE', '#E02A88', { text: '#ffffff', angle: 225 }),
+  makeGrad('g-ink-gray', '银灰', '#A6A6A6', '#696969', { text: '#171717', angle: 225 }),
   makeGrad('g-sunset', '暮霞', '#e11d48', '#f97316', { text: '#ffffff', angle: 135 }),
   makeGrad('g-ocean', '沧海', '#0284c7', '#06b6d4', { text: '#ffffff', angle: 120 }),
   makeGrad('g-aurora', '极光', '#8b5cf6', '#22d3ee', { text: '#ffffff', angle: 140 }),

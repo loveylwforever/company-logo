@@ -1,42 +1,54 @@
-import { Circle, Path, util, type Canvas, type FabricObject, type TMat2D } from 'fabric'
+import { Circle, Line, Path, util, type Canvas, type FabricObject, type TMat2D } from 'fabric'
+import { isGradientOverlay, isOverlayObject, markOverlay, safeRemove, zoomStroke } from './overlay'
 
 type PathPointRef = {
   cmdIndex: number
-  pointIndex: number // index into command args that is x (y is +1)
+  pointIndex: number
 }
 
 type AnchorMeta = {
   refs: PathPointRef[]
   path: Path
+  role: 'anchor' | 'control'
 }
 
-const ANCHOR_TYPE = 'path-anchor'
-
-function isAnchor(obj: FabricObject | undefined): boolean {
-  return Boolean(obj && (obj as FabricObject & { __anchor?: boolean }).__anchor)
+type EditablePoint = {
+  x: number
+  y: number
+  refs: PathPointRef[]
+  role: 'anchor' | 'control'
+  link?: { x: number; y: number }
 }
 
-/** Collect absolute x/y pairs from fabric path commands for editing. */
-function collectEditablePoints(path: Path): { x: number; y: number; refs: PathPointRef[] }[] {
+function collectEditablePoints(path: Path): EditablePoint[] {
   const commands = path.path as unknown as (string | number)[][]
   if (!commands?.length) return []
 
-  const groups = new Map<string, { x: number; y: number; refs: PathPointRef[] }>()
-
-  const add = (x: number, y: number, ref: PathPointRef) => {
-    const key = `${Math.round(x * 100) / 100},${Math.round(y * 100) / 100}`
-    const existing = groups.get(key)
-    if (existing) {
-      existing.refs.push(ref)
-    } else {
-      groups.set(key, { x, y, refs: [ref] })
-    }
-  }
-
+  const points: EditablePoint[] = []
   let cx = 0
   let cy = 0
   let startX = 0
   let startY = 0
+
+  const push = (
+    x: number,
+    y: number,
+    ref: PathPointRef,
+    role: 'anchor' | 'control',
+    link?: { x: number; y: number },
+  ) => {
+    if (role === 'anchor') {
+      const key = `${Math.round(x * 100) / 100},${Math.round(y * 100) / 100}`
+      const existing = points.find(
+        (p) => p.role === 'anchor' && `${Math.round(p.x * 100) / 100},${Math.round(p.y * 100) / 100}` === key,
+      )
+      if (existing) {
+        existing.refs.push(ref)
+        return
+      }
+    }
+    points.push({ x, y, refs: [ref], role, link })
+  }
 
   for (let i = 0; i < commands.length; i++) {
     const cmd = commands[i]
@@ -47,44 +59,49 @@ function collectEditablePoints(path: Path): { x: number; y: number; refs: PathPo
         cy = Number(cmd[2])
         startX = cx
         startY = cy
-        add(cx, cy, { cmdIndex: i, pointIndex: 1 })
+        push(cx, cy, { cmdIndex: i, pointIndex: 1 }, 'anchor')
         break
       case 'L':
         cx = Number(cmd[1])
         cy = Number(cmd[2])
-        add(cx, cy, { cmdIndex: i, pointIndex: 1 })
+        push(cx, cy, { cmdIndex: i, pointIndex: 1 }, 'anchor')
         break
       case 'H':
         cx = Number(cmd[1])
-        add(cx, cy, { cmdIndex: i, pointIndex: 1 })
+        push(cx, cy, { cmdIndex: i, pointIndex: 1 }, 'anchor')
         break
       case 'V':
         cy = Number(cmd[1])
-        add(cx, cy, { cmdIndex: i, pointIndex: 1 })
+        push(cx, cy, { cmdIndex: i, pointIndex: 1 }, 'anchor')
         break
-      case 'C':
-        add(Number(cmd[1]), Number(cmd[2]), { cmdIndex: i, pointIndex: 1 })
-        add(Number(cmd[3]), Number(cmd[4]), { cmdIndex: i, pointIndex: 3 })
+      case 'C': {
+        const prev = { x: cx, y: cy }
         cx = Number(cmd[5])
         cy = Number(cmd[6])
-        add(cx, cy, { cmdIndex: i, pointIndex: 5 })
+        push(Number(cmd[1]), Number(cmd[2]), { cmdIndex: i, pointIndex: 1 }, 'control', prev)
+        push(Number(cmd[3]), Number(cmd[4]), { cmdIndex: i, pointIndex: 3 }, 'control', { x: cx, y: cy })
+        push(cx, cy, { cmdIndex: i, pointIndex: 5 }, 'anchor')
         break
-      case 'Q':
-        add(Number(cmd[1]), Number(cmd[2]), { cmdIndex: i, pointIndex: 1 })
+      }
+      case 'Q': {
+        const prev = { x: cx, y: cy }
         cx = Number(cmd[3])
         cy = Number(cmd[4])
-        add(cx, cy, { cmdIndex: i, pointIndex: 3 })
+        push(Number(cmd[1]), Number(cmd[2]), { cmdIndex: i, pointIndex: 1 }, 'control', prev)
+        push(cx, cy, { cmdIndex: i, pointIndex: 3 }, 'anchor')
         break
-      case 'S':
-        add(Number(cmd[1]), Number(cmd[2]), { cmdIndex: i, pointIndex: 1 })
+      }
+      case 'S': {
         cx = Number(cmd[3])
         cy = Number(cmd[4])
-        add(cx, cy, { cmdIndex: i, pointIndex: 3 })
+        push(Number(cmd[1]), Number(cmd[2]), { cmdIndex: i, pointIndex: 1 }, 'control', { x: cx, y: cy })
+        push(cx, cy, { cmdIndex: i, pointIndex: 3 }, 'anchor')
         break
+      }
       case 'T':
         cx = Number(cmd[1])
         cy = Number(cmd[2])
-        add(cx, cy, { cmdIndex: i, pointIndex: 1 })
+        push(cx, cy, { cmdIndex: i, pointIndex: 1 }, 'anchor')
         break
       case 'Z':
       case 'z':
@@ -96,25 +113,32 @@ function collectEditablePoints(path: Path): { x: number; y: number; refs: PathPo
     }
   }
 
-  return [...groups.values()]
+  return points
 }
 
-function localToCanvas(path: Path, x: number, y: number): { x: number; y: number } {
-  const matrix = path.calcTransformMatrix()
-  const p = util.transformPoint({ x, y }, matrix)
+function pathOffsetOf(path: Path) {
+  const o = path.pathOffset
+  return { x: o?.x ?? 0, y: o?.y ?? 0 }
+}
+
+function localToCanvas(path: Path, x: number, y: number) {
+  const off = pathOffsetOf(path)
+  const p = util.transformPoint({ x: x - off.x, y: y - off.y }, path.calcTransformMatrix())
   return { x: p.x, y: p.y }
 }
 
-function canvasToLocal(path: Path, x: number, y: number): { x: number; y: number } {
+function canvasToLocal(path: Path, x: number, y: number) {
+  const off = pathOffsetOf(path)
   const inv = util.invertTransform(path.calcTransformMatrix() as TMat2D)
   const p = util.transformPoint({ x, y }, inv)
-  return { x: p.x, y: p.y }
+  return { x: p.x + off.x, y: p.y + off.y }
 }
 
 export class PathEditor {
   private canvas: Canvas
   private target: Path | null = null
   private anchors: Circle[] = []
+  private lines: Line[] = []
   private onChange: (() => void) | null = null
 
   constructor(canvas: Canvas) {
@@ -134,7 +158,6 @@ export class PathEditor {
   }
 
   clear() {
-    // 先清空 target，避免 remove 触发的 modified → rebuildAnchors 又把锚点建回来
     const hadTarget = this.target
     if (this.target) {
       this.target.set({ selectable: true, evented: true })
@@ -142,23 +165,28 @@ export class PathEditor {
     }
 
     const active = this.canvas.getActiveObject()
-    if (active && isAnchor(active)) this.canvas.discardActiveObject()
+    if (active && isOverlayObject(active) && !isGradientOverlay(active)) {
+      this.canvas.discardActiveObject()
+    }
 
+    for (const a of this.anchors) {
+      a.off('moving')
+      a.off('modified')
+      safeRemove(this.canvas, a)
+    }
+    for (const l of this.lines) safeRemove(this.canvas, l)
     this.anchors = []
+    this.lines = []
+
+    // 清扫残留路径锚点（不含渐变手柄）
     for (const o of [...this.canvas.getObjects()]) {
-      if (!isAnchor(o)) continue
-      o.off('moving')
-      o.off('modified')
-      try {
-        this.canvas.remove(o)
-      } catch {
-        /* ignore */
-      }
+      if (!isOverlayObject(o) || isGradientOverlay(o)) continue
+      safeRemove(this.canvas, o)
     }
 
     if (hadTarget) {
       for (const o of this.canvas.getObjects()) {
-        if (!isAnchor(o)) o.set({ evented: true, selectable: true })
+        if (!isOverlayObject(o)) o.set({ evented: true, selectable: true })
       }
     }
     this.canvas.requestRenderAll()
@@ -169,7 +197,7 @@ export class PathEditor {
     this.target = path
     path.set({ selectable: false, evented: false, objectCaching: false })
     for (const o of this.canvas.getObjects()) {
-      if (o !== path && !isAnchor(o)) o.set({ evented: false, selectable: false })
+      if (o !== path && !isOverlayObject(o)) o.set({ evented: false, selectable: false })
     }
     this.rebuildAnchors()
     this.canvas.discardActiveObject()
@@ -181,27 +209,49 @@ export class PathEditor {
     for (const a of this.anchors) {
       a.off('moving')
       a.off('modified')
-      this.canvas.remove(a)
+      safeRemove(this.canvas, a)
     }
+    for (const l of this.lines) safeRemove(this.canvas, l)
     this.anchors = []
-    if (!this.target) return
+    this.lines = []
 
     const points = collectEditablePoints(this.target)
-    // Cap anchors for usability on complex glyphs
-    const step = points.length > 80 ? Math.ceil(points.length / 80) : 1
+    const anchors = points.filter((p) => p.role === 'anchor')
+    const controls = points.filter((p) => p.role === 'control')
+    const showControls = controls.length <= 48
+    const controlStep = showControls ? (controls.length > 36 ? 2 : 1) : 0
+    const { radius: r, stroke } = zoomStroke(this.canvas)
+    const rAnchor = r(3)
+    const rControl = r(2.25)
 
-    for (let i = 0; i < points.length; i += step) {
-      const pt = points[i]
+    const place = (pt: EditablePoint) => {
+      if (!this.target) return
       const screen = localToCanvas(this.target, pt.x, pt.y)
+      const isControl = pt.role === 'control'
+
+      if (isControl && pt.link) {
+        const linkScreen = localToCanvas(this.target, pt.link.x, pt.link.y)
+        const line = new Line([linkScreen.x, linkScreen.y, screen.x, screen.y], {
+          stroke: 'rgba(15, 110, 86, 0.4)',
+          strokeWidth: stroke,
+          selectable: false,
+          evented: false,
+          objectCaching: false,
+        })
+        markOverlay(line)
+        this.lines.push(line)
+        this.canvas.add(line)
+      }
+
       const anchor = new Circle({
         left: screen.x,
         top: screen.y,
         originX: 'center',
         originY: 'center',
-        radius: 5,
-        fill: '#0f6e56',
-        stroke: '#fff',
-        strokeWidth: 1.5,
+        radius: isControl ? rControl : rAnchor,
+        fill: isControl ? '#fff' : '#0f6e56',
+        stroke: isControl ? '#0f6e56' : '#fff',
+        strokeWidth: stroke,
         hasControls: false,
         hasBorders: false,
         selectable: true,
@@ -209,16 +259,11 @@ export class PathEditor {
         hoverCursor: 'grab',
         moveCursor: 'grabbing',
         objectCaching: false,
-        excludeFromExport: true,
       })
-      ;(anchor as Circle & { __anchor: boolean; __meta: AnchorMeta }).__anchor = true
-      ;(anchor as Circle & { __meta: AnchorMeta }).__meta = {
-        refs: pt.refs,
-        path: this.target,
-      }
-      ;(anchor as Circle & { data?: { type: string } }).data = { type: ANCHOR_TYPE }
-      // 不进入撤销栈 / 导出
-      ;(anchor as Circle & { excludeFromExport?: boolean }).excludeFromExport = true
+      markOverlay(anchor, {
+        __meta: { refs: pt.refs, path: this.target, role: pt.role } satisfies AnchorMeta,
+        data: { type: 'path-anchor' },
+      })
 
       anchor.on('moving', () => this.onAnchorMove(anchor))
       anchor.on('modified', () => {
@@ -229,6 +274,11 @@ export class PathEditor {
       this.anchors.push(anchor)
       this.canvas.add(anchor)
       this.canvas.bringObjectToFront(anchor)
+    }
+
+    for (const pt of anchors) place(pt)
+    if (controlStep > 0) {
+      for (let i = 0; i < controls.length; i += controlStep) place(controls[i])
     }
   }
 
@@ -243,28 +293,50 @@ export class PathEditor {
       const cmd = commands[ref.cmdIndex]
       if (!cmd) continue
       const op = String(cmd[0])
-      if (op === 'H') {
-        cmd[ref.pointIndex] = local.x
-      } else if (op === 'V') {
-        cmd[ref.pointIndex] = local.y
-      } else {
+      if (op === 'H') cmd[ref.pointIndex] = local.x
+      else if (op === 'V') cmd[ref.pointIndex] = local.y
+      else {
         cmd[ref.pointIndex] = local.x
         cmd[ref.pointIndex + 1] = local.y
       }
     }
 
+    const center = this.target.getCenterPoint()
     this.target._setPath(commands as never, false)
     this.target.setDimensions()
+    this.target.setPositionByOrigin(center, 'center', 'center')
     this.target.setCoords()
+
+    this.refreshControlLines()
     this.canvas.requestRenderAll()
   }
 
-  /** Keep anchors glued when path is transformed outside edit (safety). */
+  private refreshControlLines() {
+    if (!this.target || !this.lines.length) return
+    const points = collectEditablePoints(this.target).filter((p) => p.role === 'control' && p.link)
+    const step = points.length > 48 ? 2 : 1
+    let lineIdx = 0
+    for (let i = 0; i < points.length && lineIdx < this.lines.length; i += step) {
+      const pt = points[i]
+      if (!pt.link) continue
+      const screen = localToCanvas(this.target, pt.x, pt.y)
+      const linkScreen = localToCanvas(this.target, pt.link.x, pt.link.y)
+      this.lines[lineIdx].set({
+        x1: linkScreen.x,
+        y1: linkScreen.y,
+        x2: screen.x,
+        y2: screen.y,
+      })
+      this.lines[lineIdx].setCoords()
+      lineIdx++
+    }
+  }
+
   refresh() {
     if (this.target) this.rebuildAnchors()
   }
 
   static isAnchorObject(obj: FabricObject | undefined | null): boolean {
-    return isAnchor(obj ?? undefined)
+    return isOverlayObject(obj)
   }
 }

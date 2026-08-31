@@ -50,6 +50,7 @@ function ShapeIcon({ kind }: { kind: ShapeKind }) {
     parallelogram: 'M7 5h14l-4 14H3z',
     teardrop: 'M12 2c6 8 8 11 8 14a8 8 0 1 1-16 0c0-3 2-6 8-14z',
     leaf: 'M12 3c7 4 9 10 7 15-5 2-10 1-14-3 1-5 5-10 7-12z',
+    blob: 'M12 3c5 0 9 3 9 8s-3 9-9 10S3 16 3 11 7 3 12 3z',
     line: 'M3 12h18',
   }
   const strokeOnly = kind === 'line'
