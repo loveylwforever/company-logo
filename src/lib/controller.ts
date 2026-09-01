@@ -358,6 +358,9 @@ export class LogoController {
     }
     canvas.on('object:modified', (e) => {
       refreshGradIfContent(e.target)
+      if (e.target instanceof IText && !e.target.isEditing) {
+        void this.tightenTextBounds(e.target)
+      }
       this.scheduleSave()
       this.emitSelection()
     })
@@ -398,10 +401,6 @@ export class LogoController {
       const t = opt.target
       // 编辑过程中不断收紧会跳动输入框，退出编辑或非编辑态变更时再收
       if (t instanceof IText && !t.isEditing) void this.tightenTextBounds(t)
-    })
-    canvas.on('editing:exited', (opt) => {
-      const t = opt.target
-      if (t instanceof IText) void this.tightenTextBounds(t)
     })
 
     this.history.reset(serializeCanvas(canvas))
