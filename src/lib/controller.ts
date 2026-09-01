@@ -9,7 +9,7 @@ import {
   Shadow,
   type FabricObjectProps,
 } from 'fabric'
-import { textToPathData, getFontOption, type FontOption } from './fonts'
+import { textToPathData, getFontOption, type FontOption, loadOpentypeFont, measureGlyphInk, fabricTextMetricsFromInk } from './fonts'
 import {
   shapePath,
   type ShapeKind,
@@ -35,10 +35,23 @@ import {
   downloadBlob,
   dataUrlToArrayBuffer,
   encodeIco,
+  finalizeIconSvg,
   type ExportSize,
 } from './export'
 import { getPalette, type Palette, DEFAULT_PALETTE_ID } from './palettes'
 import { AlignGuideManager } from './alignGuides'
+import {
+  clearAutoSave,
+  packProject,
+  parseProjectJson,
+  projectFileName,
+  readAutoSave,
+  writeAutoSave,
+  type LogoProject,
+  type ProjectMetaInput,
+} from './project'
+import { prepareEditablePathData } from './pathPrepare'
+import { densifyPathCommands, pathCommandsToData, type PathCmd } from './pathResample'
 
 export type { FillMode } from './fills'
 
@@ -50,6 +63,9 @@ FabricObject.customProperties = [
   '__fontId',
   '__cornerRadius',
   '__gradMemory',
+  // 按实际字形收紧后的行高参数，撤销/恢复后仍贴合墨水盒
+  '_fontSizeMult',
+  '_fontSizeFraction',
 ]
 
 /** 默认 Logo 容器边长 */
@@ -93,6 +109,12 @@ export type SelectionProps = {
   /** 形状圆角（路径本地 px）；不支持时为 undefined */
   cornerRadius?: number
   supportsCornerRadius?: boolean
+  /** 路径编辑：直线 / 曲线变形 */
+  pathEditMode?: 'line' | 'curve'
+  /** 当前线段弯曲弧度（曲线模式） */
+  pathBend?: number
+  pathBendMin?: number
+  pathBendMax?: number
 }
 
 type Listeners = {
@@ -102,6 +124,8 @@ type Listeners = {
   onObjectCount: (count: number) => void
   onZoomChange?: (zoomPercent: number) => void
   onContextMenu?: (menu: ContextMenuState | null) => void
+  /** 导入/自动恢复工程后同步左侧 name / 字体 / 配色 */
+  onProjectMeta?: (meta: ProjectMetaInput) => void
 }
 
 export type ContextMenuState = {
@@ -109,6 +133,8 @@ export type ContextMenuState = {
   y: number
   pathEditing: boolean
   locked: boolean
+  /** 右键目标是容器时不可自适应 */
+  isContainer: boolean
 }
 
 type MetaObject = FabricObject & {
@@ -274,15 +300,24 @@ export class LogoController {
   private listeners: Listeners | null = null
   private saveTimer: number | null = null
   private containerSeq = 0
+  /** 递增世代号：避免 dispose/StrictMode 竞态把旧工程写回 */
+  private lifecycleId = 0
+  private projectMeta: ProjectMetaInput = {
+    name: 'Logo',
+    fontId: 'outfit',
+    paletteId: DEFAULT_PALETTE_ID,
+  }
   private isPanning = false
   private lastPan: { x: number; y: number } | null = null
   private rightDown: { x: number; y: number; target: FabricObject | null } | null = null
   private panUpHandler: ((e: MouseEvent) => void) | null = null
   private panMoveHandler: ((e: MouseEvent) => void) | null = null
   private static readonly PAN_THRESHOLD = 4
+  private restoringProject = false
 
   mount(el: HTMLCanvasElement, listeners: Listeners) {
     this.listeners = listeners
+    const lifecycleId = ++this.lifecycleId
     const canvas = new Canvas(el, {
       width: 800,
       height: 600,
@@ -294,7 +329,10 @@ export class LogoController {
     })
     this.canvas = canvas
     this.pathEditor = new PathEditor(canvas)
-    this.pathEditor.setOnChange(() => this.scheduleSave())
+    this.pathEditor.setOnChange(() => {
+      this.scheduleSave()
+      this.emitSelection()
+    })
     this.gradientEditor = new GradientEditor(canvas)
     this.gradientEditor.setOnChange(() => {
       const t = this.gradientEditor?.activeTarget
@@ -340,22 +378,83 @@ export class LogoController {
         this.emitCount()
       }
     })
-    canvas.on('object:removed', () => {
+    canvas.on('object:removed', (e) => {
+      // 对象被删时立刻拆掉路径/渐变编辑，避免旧 path 引用残留
+      if (e.target && this.pathEditor?.activePath === e.target) {
+        this.pathEditor.clear()
+      }
+      if (e.target && this.gradientEditor?.activeTarget === e.target) {
+        this.gradientEditor.clear()
+      }
       this.emitLayers()
       this.emitCount()
     })
 
     this.bindZoom(canvas)
     this.bindRightButton(canvas)
+    this.bindPreferActiveHit(canvas)
+
+    canvas.on('text:changed', (opt) => {
+      const t = opt.target
+      // 编辑过程中不断收紧会跳动输入框，退出编辑或非编辑态变更时再收
+      if (t instanceof IText && !t.isEditing) void this.tightenTextBounds(t)
+    })
+    canvas.on('editing:exited', (opt) => {
+      const t = opt.target
+      if (t instanceof IText) void this.tightenTextBounds(t)
+    })
 
     this.history.reset(serializeCanvas(canvas))
     this.emitAll()
     this.emitZoom()
+    void this.tryRestoreAutoSave(lifecycleId)
     return canvas
+  }
+
+  /** App 同步左侧面板的名称 / 字体 / 配色，供自动保存写入 meta */
+  setProjectMeta(meta: Partial<ProjectMetaInput>) {
+    this.projectMeta = {
+      name: meta.name ?? this.projectMeta.name,
+      fontId: meta.fontId ?? this.projectMeta.fontId,
+      paletteId: meta.paletteId ?? this.projectMeta.paletteId,
+    }
+    if (meta.fontId) this.currentFontId = meta.fontId
+    if (meta.paletteId) this.currentPaletteId = meta.paletteId
+  }
+
+  /**
+   * 从图层面板选中被遮挡的对象后，仍应能拖拽该选中项。
+   * Fabric 在 preserveObjectStacking=true 时命中最上对象，这里在指针落在
+   * 当前选中对象上时优先它（叠加层手柄除外），渲染叠层顺序不变。
+   */
+  private bindPreferActiveHit(canvas: Canvas) {
+    const original = canvas.findTarget.bind(canvas)
+    canvas.findTarget = ((e) => {
+      const active = canvas.getActiveObject()
+      if (!active || active.type === 'activeSelection' || isOverlayObject(active)) {
+        return original(e)
+      }
+
+      const stacked = original(e)
+      if (!stacked.target || stacked.target === active || isOverlayObject(stacked.target)) {
+        return stacked
+      }
+
+      const prev = canvas.preserveObjectStacking
+      canvas.preserveObjectStacking = false
+      try {
+        const preferred = original(e)
+        if (preferred.target === active) return preferred
+      } finally {
+        canvas.preserveObjectStacking = prev
+      }
+      return stacked
+    }) as Canvas['findTarget']
   }
 
   private emitZoom() {
     const z = this.canvas?.getZoom() ?? 1
+    this.pathEditor?.syncZoomMetrics()
     this.listeners?.onZoomChange?.(Math.round(z * 100))
   }
 
@@ -472,6 +571,7 @@ export class LogoController {
 
     const pathEditing = Boolean(this.pathEditor?.isEditing)
     let locked = false
+    let containerTarget = isContainer(target)
 
     if (!isOverlayObject(target)) {
       const active = canvas.getActiveObjects()
@@ -482,9 +582,15 @@ export class LogoController {
       }
       const obj = canvas.getActiveObject()
       locked = Boolean(obj && obj.lockMovementX && obj.lockMovementY)
+      if (obj?.type === 'activeSelection') {
+        const objs = canvas.getActiveObjects()
+        containerTarget = objs.length > 0 && objs.every((o) => isContainer(o))
+      } else {
+        containerTarget = isContainer(obj)
+      }
     }
 
-    this.listeners?.onContextMenu?.({ x, y, pathEditing, locked })
+    this.listeners?.onContextMenu?.({ x, y, pathEditing, locked, isContainer: containerTarget })
   }
 
   private endRightButton() {
@@ -519,6 +625,8 @@ export class LogoController {
   }
 
   dispose() {
+    this.lifecycleId++
+    this.cancelScheduledSave()
     this.endRightButton()
     this.alignGuides?.clear()
     this.alignGuides = null
@@ -636,12 +744,17 @@ export class LogoController {
     if (this.pathEditor?.isEditing) {
       const path = this.pathEditor.activePath
       if (path) {
+        const bend = this.pathEditor.bendSliderRange()
         this.listeners?.onSelectionChange(
           this.buildSelectionProps(path, {
             isText: false,
             isPath: true,
             isContainer: false,
             pathEditing: true,
+            pathEditMode: this.pathEditor.editMode,
+            pathBend: bend.value,
+            pathBendMin: bend.min,
+            pathBendMax: bend.max,
           }),
         )
         return
@@ -683,15 +796,44 @@ export class LogoController {
     this.saveTimer = window.setTimeout(() => this.saveHistory(), 280)
   }
 
+  private cancelScheduledSave() {
+    if (this.saveTimer) {
+      window.clearTimeout(this.saveTimer)
+      this.saveTimer = null
+    }
+  }
+
+  /** 拆掉路径/渐变编辑态与锚点，避免删对象后旧引用复活 */
+  private tearDownEditors() {
+    this.pathEditor?.clear()
+    this.gradientEditor?.clear()
+    this.alignGuides?.clear()
+    this.stripOverlayObjects()
+    this.listeners?.onContextMenu?.(null)
+  }
+
   saveHistory() {
-    if (!this.canvas) return
+    if (!this.canvas || this.restoringProject) return
     const editing = this.pathEditor?.isEditing
     const path = this.pathEditor?.activePath
     if (editing) this.pathEditor?.clear()
-    this.history.push(serializeCanvas(this.canvas))
+    const gradActive = this.gradientEditor?.activeTarget
+    this.gradientEditor?.clear()
+    this.alignGuides?.clear()
+    this.stripOverlayObjects()
+
+    const json = serializeCanvas(this.canvas)
+    this.history.push(json)
+    this.persistAutoSave(json)
     this.emitHistory()
-    if (editing && path) {
+
+    // 仅当 path 仍在画布上时才恢复编辑（防止删后防抖保存把旧 path 又 start 回来）
+    if (editing && path && this.canvas.getObjects().includes(path)) {
       this.pathEditor?.start(path)
+      this.emitSelection()
+    } else if (gradActive && this.canvas.getObjects().includes(gradActive)) {
+      this.canvas.setActiveObject(gradActive)
+      this.syncGradientEditor()
       this.emitSelection()
     }
   }
@@ -701,8 +843,10 @@ export class LogoController {
     this.pathEditor?.clear()
     await this.history.undo(this.canvas)
     this.canvas.backgroundColor = ''
+    await this.tightenAllTexts()
     this.canvas.requestRenderAll()
     this.emitAll()
+    this.persistAutoSave(serializeCanvas(this.canvas))
   }
 
   async redo() {
@@ -710,19 +854,199 @@ export class LogoController {
     this.pathEditor?.clear()
     await this.history.redo(this.canvas)
     this.canvas.backgroundColor = ''
+    await this.tightenAllTexts()
     this.canvas.requestRenderAll()
     this.emitAll()
+    this.persistAutoSave(serializeCanvas(this.canvas))
+  }
+
+  /** 兼容旧快照：对尚未收紧的 IText 补一次墨水盒测量 */
+  private async tightenAllTexts() {
+    const texts = this.textObjects().filter((o): o is IText => o instanceof IText)
+    await Promise.all(texts.map((t) => this.tightenTextBounds(t)))
   }
 
   clearAll() {
     if (!this.canvas) return
-    this.pathEditor?.clear()
+    this.cancelScheduledSave()
+    this.tearDownEditors()
     this.canvas.clear()
     this.canvas.backgroundColor = ''
     this.containerSeq = 0
     this.canvas.requestRenderAll()
     this.saveHistory()
     this.emitAll()
+  }
+
+  private stripOverlayObjects() {
+    const canvas = this.canvas
+    if (!canvas) return
+    for (const obj of [...canvas.getObjects()]) {
+      if (isOverlayObject(obj)) canvas.remove(obj)
+    }
+  }
+
+  private buildProject(meta: ProjectMetaInput, canvasJson: Record<string, unknown>): LogoProject {
+    const canvas = this.canvas!
+    const vpt = canvas.viewportTransform ?? [1, 0, 0, 1, 0, 0]
+    return packProject({
+      meta: {
+        name: meta.name,
+        fontId: meta.fontId,
+        paletteId: meta.paletteId,
+        containerSeq: this.containerSeq,
+      },
+      viewport: {
+        zoom: canvas.getZoom(),
+        vpt: Array.from(vpt),
+      },
+      canvas: canvasJson,
+    })
+  }
+
+  private persistAutoSave(canvasJsonStr: string) {
+    if (!this.canvas) return
+    try {
+      const canvasJson = JSON.parse(canvasJsonStr) as Record<string, unknown>
+      const project = this.buildProject(
+        {
+          name: this.projectMeta.name,
+          fontId: this.currentFontId,
+          paletteId: this.currentPaletteId,
+        },
+        canvasJson,
+      )
+      writeAutoSave(project)
+    } catch (err) {
+      console.warn('autosave failed', err)
+    }
+  }
+
+  /** 导出可再编辑的工程文件（.logo.json） */
+  exportProject(meta?: ProjectMetaInput) {
+    const canvas = this.canvas
+    if (!canvas) return
+    const m = meta ?? this.projectMeta
+    this.setProjectMeta(m)
+
+    const editing = this.pathEditor?.isEditing
+    const path = this.pathEditor?.activePath
+    const active = canvas.getActiveObject()
+    this.pathEditor?.clear()
+    this.gradientEditor?.clear()
+    this.alignGuides?.clear()
+    this.listeners?.onContextMenu?.(null)
+    canvas.discardActiveObject()
+    this.stripOverlayObjects()
+
+    try {
+      const json = serializeCanvas(canvas)
+      const project = this.buildProject(m, JSON.parse(json) as Record<string, unknown>)
+      downloadBlob(
+        new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' }),
+        projectFileName(m.name),
+      )
+      writeAutoSave(project)
+    } finally {
+      if (editing && path && canvas.getObjects().includes(path)) {
+        this.pathEditor?.start(path)
+      } else if (active && canvas.getObjects().includes(active)) {
+        canvas.setActiveObject(active)
+      }
+      canvas.requestRenderAll()
+      this.emitSelection()
+    }
+  }
+
+  /** 从用户选择的工程文件完整还原画布 */
+  async importProjectFile(file: File): Promise<boolean> {
+    try {
+      const text = await file.text()
+      const project = parseProjectJson(text)
+      await this.loadProject(project)
+      return true
+    } catch (err) {
+      console.error(err)
+      window.alert(err instanceof Error ? err.message : '导入工程失败')
+      return false
+    }
+  }
+
+  async tryRestoreAutoSave(lifecycleId = this.lifecycleId): Promise<boolean> {
+    if (!this.canvas || this.contentObjects().length > 0) return false
+    const project = readAutoSave()
+    if (!project) return false
+    try {
+      await this.loadProject(project, lifecycleId)
+      return this.lifecycleId === lifecycleId
+    } catch (err) {
+      console.warn('restore autosave failed', err)
+      if (this.lifecycleId === lifecycleId) clearAutoSave()
+      return false
+    }
+  }
+
+  async loadProject(project: LogoProject, lifecycleId = this.lifecycleId) {
+    const canvas = this.canvas
+    if (!canvas) return
+    if (lifecycleId !== this.lifecycleId) return
+
+    this.restoringProject = true
+    this.cancelScheduledSave()
+    try {
+      this.tearDownEditors()
+      canvas.discardActiveObject()
+
+      await canvas.loadFromJSON(JSON.stringify(project.canvas))
+
+      // StrictMode / dispose 后丢弃过期恢复，避免把旧 logo 写回缓存与画布
+      if (lifecycleId !== this.lifecycleId || this.canvas !== canvas) return
+
+      this.stripOverlayObjects()
+      for (const obj of canvas.getObjects()) ensureId(obj)
+
+      canvas.backgroundColor = ''
+      this.containerSeq = Math.max(0, Math.floor(project.meta.containerSeq))
+      this.currentFontId = project.meta.fontId
+      this.currentPaletteId = project.meta.paletteId
+      const palette = getPalette(project.meta.paletteId)
+      this.currentShapeColor = palette.shape
+      this.currentTextColor = palette.text
+      this.currentAccentColor = palette.accent
+      this.projectMeta = {
+        name: project.meta.name,
+        fontId: project.meta.fontId,
+        paletteId: project.meta.paletteId,
+      }
+
+      const vpt = project.viewport.vpt
+      if (vpt.length >= 6) {
+        canvas.setViewportTransform([
+          Number(vpt[0]) || 1,
+          Number(vpt[1]) || 0,
+          Number(vpt[2]) || 0,
+          Number(vpt[3]) || 1,
+          Number(vpt[4]) || 0,
+          Number(vpt[5]) || 0,
+        ])
+      }
+
+      await this.tightenAllTexts()
+      if (lifecycleId !== this.lifecycleId || this.canvas !== canvas) return
+
+      canvas.requestRenderAll()
+      this.history.reset(serializeCanvas(canvas))
+      this.emitAll()
+      this.emitZoom()
+      this.listeners?.onProjectMeta?.({
+        name: project.meta.name,
+        fontId: project.meta.fontId,
+        paletteId: project.meta.paletteId,
+      })
+      writeAutoSave(project)
+    } finally {
+      if (lifecycleId === this.lifecycleId) this.restoringProject = false
+    }
   }
 
   /** 放置点：优先选中容器中心，否则视口中心 */
@@ -827,32 +1151,69 @@ export class LogoController {
       fontSize,
       fill: this.currentTextColor,
       objectCaching: false,
+      // 先用接近墨水盒的占位，异步测量后再精确收紧
+      lineHeight: 1,
     })
     ;(itext as MetaObject).__fontId = f.id
     ensureId(itext)
     this.canvas.add(itext)
     this.canvas.setActiveObject(itext)
     this.canvas.requestRenderAll()
-    this.saveHistory()
-    this.emitAll()
+    void this.tightenTextBounds(itext).then(() => {
+      this.saveHistory()
+      this.emitAll()
+    })
+  }
+
+  /**
+   * 用 opentype 实测字形墨水盒，改写 Fabric 默认行高，去掉底部（及顶部）多余留白。
+   * 无下行字母时不再按整字身预留空白；有 g/y 时则按真实下行扩展，避免裁切。
+   */
+  async tightenTextBounds(obj: IText) {
+    const canvas = this.canvas
+    if (!canvas || !obj || isOverlayObject(obj)) return
+    const fontId = (obj as MetaObject).__fontId || this.currentFontId
+    const fontSize = obj.fontSize || 72
+    const content = obj.text || ' '
+    try {
+      const font = await loadOpentypeFont(getFontOption(fontId))
+      const ink = measureGlyphInk(font, content, fontSize)
+      const metrics = fabricTextMetricsFromInk(ink.y1, ink.y2, fontSize)
+      const center = obj.getCenterPoint()
+      obj.set({
+        ...metrics,
+        lineHeight: 1,
+      })
+      obj.initDimensions()
+      obj.setPositionByOrigin(center, 'center', 'center')
+      obj.setCoords()
+      obj.dirty = true
+      canvas.requestRenderAll()
+      this.emitSelection()
+    } catch (err) {
+      console.warn('tightenTextBounds failed', err)
+    }
   }
 
   setCurrentFont(fontId: string) {
     this.currentFontId = fontId
+    this.projectMeta = { ...this.projectMeta, fontId }
     const opt = getFontOption(fontId)
     const obj = this.canvas?.getActiveObject()
     if (obj instanceof IText) {
       obj.set('fontFamily', opt.cssFamily)
       ;(obj as MetaObject).__fontId = fontId
-      this.canvas?.requestRenderAll()
-      this.scheduleSave()
-      this.emitSelection()
-      this.emitLayers()
+      void this.tightenTextBounds(obj).then(() => {
+        this.scheduleSave()
+        this.emitSelection()
+        this.emitLayers()
+      })
     }
   }
 
   applyPalette(palette: Palette) {
     this.currentPaletteId = palette.id
+    this.projectMeta = { ...this.projectMeta, paletteId: palette.id }
     this.currentShapeColor = palette.shape
     this.currentTextColor = palette.text
     this.currentAccentColor = palette.accent
@@ -930,6 +1291,10 @@ export class LogoController {
     if (target instanceof IText) {
       if (partial.fontSize !== undefined) target.set('fontSize', partial.fontSize)
       if (partial.fontFamily !== undefined) target.set('fontFamily', partial.fontFamily)
+      // 字号变化后按已有 mult 重算即可；仍跑一遍收紧，兼容尚未收紧的旧对象
+      if (partial.fontSize !== undefined || partial.fontFamily !== undefined) {
+        void this.tightenTextBounds(target)
+      }
     }
 
     if (partial.cornerRadius !== undefined && target instanceof Path) {
@@ -1059,9 +1424,18 @@ export class LogoController {
 
     const fontId = (obj as MetaObject).__fontId || this.currentFontId
     const fontSize = obj.fontSize || 72
+    // 取消未完成的防抖保存，并清掉编辑器，避免旧 path 引用串台
+    this.cancelScheduledSave()
+    this.tearDownEditors()
+
     try {
       const { pathData } = await textToPathData(obj.text || ' ', fontId, fontSize)
-      const path = new Path(pathData, {
+      if (!this.canvas || this.canvas !== canvas) return
+      // 对象可能在 await 期间被删掉
+      if (!canvas.getObjects().includes(obj)) return
+
+      const editable = prepareEditablePathData(pathData)
+      const path = new Path(editable, {
         left: obj.left,
         top: obj.top,
         originX: obj.originX,
@@ -1073,8 +1447,14 @@ export class LogoController {
         stroke: obj.stroke,
         strokeWidth: obj.strokeWidth,
         opacity: obj.opacity,
+        // 文字复合轮廓（o/g 字腔）用 evenodd，避免绕向误差把右侧接缝拉空
+        fillRule: 'evenodd',
         objectCaching: false,
       })
+      // 深拷贝命令，切断与解析缓存/临时数组的任何共享引用
+      const cmds = (path.path as unknown as PathCmd[]).map((c) => c.slice() as PathCmd)
+      path._setPath(cmds as never, false)
+      path.setDimensions()
       ;(path as MetaObject).__label = obj.text?.slice(0, 12) || '文字路径'
       ensureId(path)
       canvas.remove(obj)
@@ -1095,8 +1475,30 @@ export class LogoController {
     const obj = canvas.getActiveObject()
     if (!(obj instanceof Path) || isContainer(obj)) return
     this.gradientEditor?.clear()
+    // 形状/旧路径进入编辑时同样补点：长边可拖、圆弧更均匀（已够密则几乎不变）
+    this.densifyActivePath(obj)
     this.pathEditor.start(obj)
     this.emitSelection()
+  }
+
+  /** 保持中心与外形，仅加密锚点（Fabric path 已是 M/L/C/Z） */
+  private densifyActivePath(path: Path) {
+    try {
+      const cmds = path.path as unknown as PathCmd[] | undefined
+      if (!cmds?.length) return
+      const dense = densifyPathCommands(cmds.map((c) => c.slice() as PathCmd))
+      const next = pathCommandsToData(dense)
+      const prev = pathCommandsToData(cmds)
+      if (next === prev) return
+      const center = path.getCenterPoint()
+      path._setPath(next, false)
+      path.setDimensions()
+      path.setPositionByOrigin(center, 'center', 'center')
+      path.setCoords()
+      path.dirty = true
+    } catch (err) {
+      console.warn('densify path failed', err)
+    }
   }
 
   stopPathEdit() {
@@ -1111,6 +1513,18 @@ export class LogoController {
     this.emitSelection()
     this.emitLayers()
     this.syncGradientEditor()
+  }
+
+  setPathEditMode(mode: 'line' | 'curve') {
+    this.pathEditor?.setMode(mode)
+    this.emitSelection()
+    this.scheduleSave()
+  }
+
+  setPathBend(amount: number) {
+    this.pathEditor?.setBendAmount(amount)
+    this.emitSelection()
+    this.scheduleSave()
   }
 
   selectById(id: string) {
@@ -1175,21 +1589,123 @@ export class LogoController {
     this.emitLayers()
   }
 
+  /**
+   * 将选中文字/图形（或框选组）等比缩放到所属 Logo 容器内部，
+   * 以较大边对齐容器内边，并居中放置。
+   */
+  fitToContainer() {
+    const canvas = this.canvas
+    if (!canvas || this.pathEditor?.isEditing) return
+
+    const obj = canvas.getActiveObject()
+    if (!obj || isOverlayObject(obj) || isContainer(obj)) {
+      window.alert('请选中文字或形状后再自适应容器')
+      return
+    }
+    if (obj.lockMovementX && obj.lockMovementY) {
+      window.alert('对象已锁定，请先解锁')
+      return
+    }
+
+    if (obj.type === 'activeSelection') {
+      const parts = canvas.getActiveObjects().filter((o) => !isOverlayObject(o))
+      if (!parts.length || parts.every((o) => isContainer(o))) {
+        window.alert('请选中文字或形状后再自适应容器')
+        return
+      }
+    }
+
+    const container = this.resolveFitContainer(obj)
+    if (!container) {
+      window.alert('画布上没有可用的 Logo 容器，请先添加容器')
+      return
+    }
+
+    const clip = this.containerClip(container)
+    const cw = clip.side
+    const ch = clip.side
+    const cx = clip.left + clip.side / 2
+    const cy = clip.top + clip.side / 2
+
+    obj.setCoords()
+    const ow = Math.max(1e-3, obj.getScaledWidth())
+    const oh = Math.max(1e-3, obj.getScaledHeight())
+    // 保持宽高比：较大边贴合容器内边（contain）
+    const factor = Math.min(cw / ow, ch / oh)
+    if (!Number.isFinite(factor) || factor <= 0) return
+
+    obj.scaleX = (obj.scaleX || 1) * factor
+    obj.scaleY = (obj.scaleY || 1) * factor
+    obj.setPositionByOrigin(new Point(cx, cy), 'center', 'center')
+    obj.setCoords()
+    obj.dirty = true
+
+    canvas.requestRenderAll()
+    this.saveHistory()
+    this.emitSelection()
+    this.emitLayers()
+  }
+
+  /** 优先：对象中心所在容器 → 唯一容器 → 最近容器 */
+  private resolveFitContainer(obj: FabricObject): Rect | null {
+    const containers = this.containerObjects()
+    if (!containers.length) return null
+
+    obj.setCoords()
+    const center = obj.getCenterPoint()
+
+    const containing = containers.find((c) => {
+      c.setCoords()
+      const b = c.getBoundingRect()
+      return (
+        center.x >= b.left &&
+        center.x <= b.left + b.width &&
+        center.y >= b.top &&
+        center.y <= b.top + b.height
+      )
+    })
+    if (containing) return containing
+    if (containers.length === 1) return containers[0]
+
+    let best: Rect | null = null
+    let bestDist = Infinity
+    for (const c of containers) {
+      const cc = c.getCenterPoint()
+      const d = Math.hypot(cc.x - center.x, cc.y - center.y)
+      if (d < bestDist) {
+        bestDist = d
+        best = c
+      }
+    }
+    return best
+  }
+
   deleteSelected() {
     const canvas = this.canvas
     if (!canvas) return
+
+    this.cancelScheduledSave()
+
     if (this.pathEditor?.isEditing) {
       const path = this.pathEditor.activePath
-      this.pathEditor.clear()
-      if (path) canvas.remove(path)
+      this.tearDownEditors()
+      if (path && canvas.getObjects().includes(path)) canvas.remove(path)
+      canvas.discardActiveObject()
+      canvas.requestRenderAll()
       this.saveHistory()
       this.emitAll()
       return
     }
+
     const objs = canvas.getActiveObjects().filter((o) => !isOverlayObject(o))
     if (!objs.length) return
+
+    // 删前提前拆编辑器，防止 object:removed / 防抖保存重启旧 path
+    this.tearDownEditors()
     canvas.discardActiveObject()
-    for (const o of objs) canvas.remove(o)
+    for (const o of objs) {
+      if (canvas.getObjects().includes(o)) canvas.remove(o)
+    }
     canvas.requestRenderAll()
     this.saveHistory()
     this.emitAll()
@@ -1221,8 +1737,22 @@ export class LogoController {
     const hidden: { obj: FabricObject; visible: boolean; exclude: boolean }[] = []
     const cacheRestore: { obj: FabricObject; caching: boolean }[] = []
 
+    container.setCoords()
+    const clip = this.containerClip(container)
+
     for (const obj of canvas.getObjects()) {
       if (isContainer(obj) || isOverlayObject(obj)) {
+        hidden.push({
+          obj,
+          visible: obj.visible !== false,
+          exclude: Boolean(obj.excludeFromExport),
+        })
+        obj.visible = false
+        obj.excludeFromExport = true
+        continue
+      }
+      // 容器外对象不进导出文件，避免缩略图按「全画布内容」算包围盒导致偏移
+      if (!this.intersectsExportClip(obj, clip)) {
         hidden.push({
           obj,
           visible: obj.visible !== false,
@@ -1239,8 +1769,6 @@ export class LogoController {
         obj.objectCaching = false
       }
     }
-    container.setCoords()
-    const clip = this.containerClip(container)
     canvas.requestRenderAll()
     try {
       return fn(clip)
@@ -1250,6 +1778,81 @@ export class LogoController {
         obj.excludeFromExport = exclude
       }
       for (const { obj, caching } of cacheRestore) obj.objectCaching = caching
+    }
+  }
+
+  private intersectsExportClip(obj: FabricObject, clip: ContainerClip): boolean {
+    obj.setCoords()
+    const b = obj.getBoundingRect()
+    return !(
+      b.left + b.width < clip.left ||
+      b.top + b.height < clip.top ||
+      b.left > clip.left + clip.side ||
+      b.top > clip.top + clip.side
+    )
+  }
+
+  /**
+   * 导出前把 IText 临时换成 opentype 轮廓 Path。
+   * 行业常规做法：图标 SVG 不依赖系统字体，避免 Finder 预览错位/裁切。
+   */
+  private async withOutlinedTexts<T>(fn: () => T | Promise<T>): Promise<T> {
+    const canvas = this.canvas!
+    const swaps: { text: IText; path: Path; index: number }[] = []
+
+    const texts = canvas
+      .getObjects()
+      .filter((o): o is IText => o instanceof IText && !isOverlayObject(o) && o.visible !== false)
+
+    // 先收紧选框到墨水盒，再转轮廓，保证与画布视觉中心一致
+    await Promise.all(texts.map((t) => this.tightenTextBounds(t)))
+
+    for (const text of texts) {
+      const fontId = (text as MetaObject).__fontId || this.currentFontId
+      const index = canvas.getObjects().indexOf(text)
+      if (index < 0) continue
+      try {
+        const { pathData } = await textToPathData(text.text || ' ', fontId, text.fontSize || 72)
+        const path = new Path(pathData, {
+          left: text.left,
+          top: text.top,
+          originX: text.originX,
+          originY: text.originY,
+          angle: text.angle,
+          scaleX: text.scaleX,
+          scaleY: text.scaleY,
+          flipX: text.flipX,
+          flipY: text.flipY,
+          fill: text.fill,
+          stroke: text.stroke,
+          strokeWidth: text.strokeWidth,
+          strokeDashArray: text.strokeDashArray ?? undefined,
+          strokeLineCap: text.strokeLineCap,
+          strokeLineJoin: text.strokeLineJoin,
+          opacity: text.opacity,
+          shadow: text.shadow ?? undefined,
+          objectCaching: false,
+          selectable: false,
+          evented: false,
+        })
+        canvas.remove(text)
+        canvas.insertAt(index, path)
+        swaps.push({ text, path, index })
+      } catch (err) {
+        console.warn('outline text for export failed', err)
+      }
+    }
+
+    canvas.requestRenderAll()
+    try {
+      return await fn()
+    } finally {
+      for (const { text, path, index } of [...swaps].reverse()) {
+        canvas.remove(path)
+        const at = Math.min(index, canvas.getObjects().length)
+        canvas.insertAt(at, text)
+      }
+      canvas.requestRenderAll()
     }
   }
 
@@ -1275,7 +1878,7 @@ export class LogoController {
     this.alignGuides?.clear()
     canvas.requestRenderAll()
     try {
-      return await fn()
+      return await this.withOutlinedTexts(() => fn())
     } finally {
       canvas.setViewportTransform(prevVpt)
       if (editing && path) this.pathEditor?.start(path)
@@ -1301,41 +1904,19 @@ export class LogoController {
     )
   }
 
-  /**
-   * 将 Fabric toSVG 结果归一到「容器 = 整张图」：
-   * viewBox/width/height 均为容器边长，内容平移到原点。
-   * （不把 clip-path 与 transform 写在同一元素上，避免裁切错位）
-   */
-  private normalizeContainerSvg(svg: string, left: number, top: number, side: number): string {
-    const s = Number(side.toFixed(3))
-    const l = Number(left.toFixed(3))
-    const t = Number(top.toFixed(3))
-    let out = svg
-      .replace(/\swidth="[^"]*"/, ` width="${s}"`)
-      .replace(/\sheight="[^"]*"/, ` height="${s}"`)
-      .replace(/\sviewBox="[^"]*"/, ` viewBox="0 0 ${s} ${s}"`)
-    if (out.includes('</defs>')) {
-      out = out.replace(/<\/defs>\n?/, `</defs>\n<g transform="translate(${-l} ${-t})">\n`)
-    } else {
-      out = out.replace(/(<svg[^>]*>\n?)/, `$1<g transform="translate(${-l} ${-t})">\n`)
-    }
-    return out.replace(/<\/svg>\s*$/, '</g>\n</svg>\n')
-  }
-
   private buildContainerSvg(container: Rect): string {
     return this.withExportContent(container, ({ left, top, side }) => {
       const canvas = this.canvas!
       const prevSvgVpt = canvas.svgViewportTransformation
       canvas.svgViewportTransformation = false
       try {
-        // 先按容器区域裁切导出，再归一到 0,0，保证文件内无大画布留白
         const raw = canvas.toSVG({
           suppressPreamble: true,
           width: String(side),
           height: String(side),
           viewBox: { x: left, y: top, width: side, height: side },
         })
-        return this.normalizeContainerSvg(raw, left, top, side)
+        return finalizeIconSvg(raw, left, top, side)
       } finally {
         canvas.svgViewportTransformation = prevSvgVpt
       }

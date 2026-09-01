@@ -132,6 +132,35 @@ function layoutPath(font: Font, text: string, x: number, y: number, fontSize: nu
   return path
 }
 
+/** 相对 baseline=0 的实际字形墨水盒（canvas 坐标，y 向下） */
+export function measureGlyphInk(font: Font, text: string, fontSize: number) {
+  const path = layoutPath(font, text || ' ', 0, 0, fontSize)
+  const bbox = path.getBoundingBox()
+  const width = Math.max(1, bbox.x2 - bbox.x1)
+  const height = Math.max(1, bbox.y2 - bbox.y1)
+  return {
+    x1: bbox.x1,
+    y1: bbox.y1,
+    x2: bbox.x2,
+    y2: bbox.y2,
+    width,
+    height,
+  }
+}
+
+/**
+ * 把 opentype 墨水盒换成 Fabric Text 的行高参数，使选框贴合实际字形。
+ * Fabric 基线在局部坐标：height * (0.5 - _fontSizeFraction)
+ */
+export function fabricTextMetricsFromInk(y1: number, y2: number, fontSize: number) {
+  const inkH = Math.max(1, y2 - y1)
+  const fs = Math.max(1e-6, fontSize)
+  return {
+    _fontSizeMult: Math.max(0.35, Math.min(3, inkH / fs)),
+    _fontSizeFraction: Math.max(-0.5, Math.min(1.5, y2 / inkH)),
+  }
+}
+
 export async function textToPathData(
   text: string,
   fontId: string,
@@ -140,14 +169,12 @@ export async function textToPathData(
   const option = getFontOption(fontId)
   const font = await loadOpentypeFont(option)
   const content = text || ' '
-  const path = layoutPath(font, content, 0, 0, fontSize)
-  const bbox = path.getBoundingBox()
-  const w = Math.max(1, bbox.x2 - bbox.x1)
-  const h = Math.max(1, bbox.y2 - bbox.y1)
-  const shifted = layoutPath(font, content, -bbox.x1, -bbox.y1, fontSize)
+  const ink = measureGlyphInk(font, content, fontSize)
+  const shifted = layoutPath(font, content, -ink.x1, -ink.y1, fontSize)
+  // 原始字体轮廓锚点疏密不均；交给调用方 prepareEditablePathData 再补点
   return {
-    pathData: shifted.toPathData(2),
-    width: w,
-    height: h,
+    pathData: shifted.toPathData(4),
+    width: ink.width,
+    height: ink.height,
   }
 }

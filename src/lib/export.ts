@@ -71,6 +71,51 @@ export function dataUrlToArrayBuffer(dataUrl: string): ArrayBuffer {
   return bytes.buffer
 }
 
+/**
+ * 将 Fabric toSVG 结果整理为「图标用」方图 SVG：
+ * - viewBox / width / height 统一为容器边长（原点在容器左上）
+ * - 透明占位 rect：避免 Finder / 资源管理器按内容 bbox 裁切导致看起来不居中
+ * - clipPath：裁掉容器外溢出（描边等）
+ */
+export function finalizeIconSvg(fabricSvg: string, left: number, top: number, side: number): string {
+  const s = roundExport(side)
+  const l = roundExport(left)
+  const t = roundExport(top)
+
+  const defsMatch = fabricSvg.match(/<defs[^>]*>[\s\S]*?<\/defs>/i)
+  const defsInner = defsMatch
+    ? defsMatch[0].replace(/^<defs[^>]*>/i, '').replace(/<\/defs>$/i, '')
+    : ''
+
+  let body = fabricSvg
+  if (defsMatch) body = body.replace(defsMatch[0], '')
+  body = body
+    .replace(/^[\s\S]*?<svg[^>]*>/i, '')
+    .replace(/<\/svg>\s*$/i, '')
+    .trim()
+
+  const clipId = 'logo-frame'
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" width="${s}" height="${s}" viewBox="0 0 ${s} ${s}">`,
+    '<defs>',
+    defsInner.trim(),
+    `<clipPath id="${clipId}"><rect x="0" y="0" width="${s}" height="${s}"/></clipPath>`,
+    '</defs>',
+    // 强制缩略图使用完整画板（opacity=0 仍计入 bbox，fill=none 在部分查看器会被忽略）
+    `<rect width="${s}" height="${s}" fill="#ffffff" opacity="0"/>`,
+    `<g clip-path="url(#${clipId})" transform="translate(${-l} ${-t})">`,
+    body,
+    '</g>',
+    '</svg>',
+    '',
+  ].join('\n')
+}
+
+function roundExport(n: number) {
+  return Number(n.toFixed(3))
+}
+
 /** 常见网站图标尺寸：浏览器标签 / ICO / Apple / Android·PWA */
 export const EXPORT_SIZES = [
   16, // 浏览器标签、书签

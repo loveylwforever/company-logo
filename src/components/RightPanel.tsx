@@ -30,7 +30,10 @@ export function RightPanel({ selection, layers, selectedIds }: Props) {
   }
 
   const hasSelection = Boolean(selection)
-  const canExport = Boolean(selection?.isContainer)
+  // 单击容器，或框选/多选里包含容器，均可导出（容器常置底，框选更易选中）
+  const canExport =
+    Boolean(selection?.isContainer) ||
+    layers.some((l) => Boolean(l.isContainer) && selectedIds.includes(l.id))
   const canStyle = hasSelection && !selection!.isContainer
   const sizeSet = new Set(sizes)
 
@@ -216,11 +219,47 @@ export function RightPanel({ selection, layers, selectedIds }: Props) {
             </div>
             <p className="path-feature-desc">
               {s.pathEditing
-                ? '实心点为锚点，空心点为控制柄。调完后点下方完成，结果可继续上色与导出。'
+                ? s.pathEditMode === 'curve'
+                  ? '实心点移锚点，空心点调切线，橙色点拉弧度。也可用下方滑条微调弯曲。'
+                  : '直线模式：拖实心锚点折线变形。切到「曲线」后可拉弧度。'
                 : s.isText
-                  ? '先转为路径，再用锚点拉出专属字形轮廓——Logo 差异化的关键一步。'
+                  ? '先转为路径（自动均匀补点），再用锚点拉出专属字形轮廓——Logo 差异化的关键一步。'
                   : '进入编辑后拖动锚点与控制柄，精细调整轮廓，做出独一无二的标志形态。'}
             </p>
+            {s.pathEditing && (
+              <div className="path-edit-tools">
+                <div className="toolbar-group path-mode-group">
+                  <button
+                    type="button"
+                    className={s.pathEditMode === 'line' ? 'active' : ''}
+                    onClick={() => controller.setPathEditMode('line')}
+                  >
+                    直线变形
+                  </button>
+                  <button
+                    type="button"
+                    className={s.pathEditMode !== 'line' ? 'active' : ''}
+                    onClick={() => controller.setPathEditMode('curve')}
+                  >
+                    曲线变形
+                  </button>
+                </div>
+                {s.pathEditMode !== 'line' && (
+                  <label className="path-bend-label">
+                    <span>弯曲弧度</span>
+                    <input
+                      type="range"
+                      min={s.pathBendMin ?? -40}
+                      max={s.pathBendMax ?? 40}
+                      step={0.5}
+                      value={s.pathBend ?? 0}
+                      onChange={(e) => controller.setPathBend(Number(e.target.value))}
+                    />
+                    <em>{Math.round(s.pathBend ?? 0)}</em>
+                  </label>
+                )}
+              </div>
+            )}
             <div className="path-feature-actions">
               {s.isText && (
                 <button
@@ -491,8 +530,8 @@ export function RightPanel({ selection, layers, selectedIds }: Props) {
         </div>
         <p className="muted">
           {canExport
-            ? 'PNG 按勾选尺寸导出；ICO 仅打包 ≤256；180=Apple，192/512=PWA'
-            : '请先选中一个 Logo 容器，导出按钮才会可用'}
+            ? '导出时文字会转成矢量轮廓（不依赖系统字体）；PNG 按勾选尺寸；ICO 仅打包 ≤256'
+            : '请选中 Logo 容器（单击或框选包含即可），导出按钮才会可用'}
         </p>
       </AccordionSection>
     </aside>

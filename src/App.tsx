@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react'
 import { LeftPanel } from './components/LeftPanel'
 import { CanvasStage } from './components/CanvasStage'
 import { RightPanel } from './components/RightPanel'
@@ -38,6 +38,7 @@ export default function App() {
   const [canUndo, setCanUndo] = useState(false)
   const [canRedo, setCanRedo] = useState(false)
   const [objectCount, setObjectCount] = useState(0)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const onSelectionChange = useCallback((props: SelectionProps | null) => {
     setSelection(props)
@@ -55,6 +56,16 @@ export default function App() {
   }, [])
 
   const onObjectCount = useCallback((n: number) => setObjectCount(n), [])
+
+  const onProjectMeta = useCallback((meta: { name: string; fontId: string; paletteId: string }) => {
+    setName(meta.name)
+    setFontId(meta.fontId)
+    setPaletteId(meta.paletteId)
+  }, [])
+
+  useEffect(() => {
+    controller.setProjectMeta({ name, fontId, paletteId })
+  }, [name, fontId, paletteId])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -81,11 +92,27 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
+  const exportProject = () => {
+    controller.exportProject({ name, fontId, paletteId })
+  }
+
+  const importProject = () => {
+    fileInputRef.current?.click()
+  }
+
+  const onImportFile = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    if (!window.confirm('导入将替换当前画布，未导出的修改会丢失。继续？')) return
+    await controller.importProjectFile(file)
+  }
+
   return (
     <div className="app">
       <header className="topbar">
         <h1>Logo 制作器</h1>
-        <span className="muted">自由画布 · 多容器多 Logo · 选中容器导出</span>
+        <span className="muted">工程文件可备份 · 选中容器导出图标</span>
         <div className="spacer" />
         <div className="actions">
           <button type="button" disabled={!canUndo} onClick={() => void controller.undo()}>
@@ -94,6 +121,19 @@ export default function App() {
           <button type="button" disabled={!canRedo} onClick={() => void controller.redo()}>
             重做
           </button>
+          <button type="button" onClick={exportProject}>
+            导出工程
+          </button>
+          <button type="button" onClick={importProject}>
+            导入工程
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json,.logo.json,application/json"
+            hidden
+            onChange={(e) => void onImportFile(e)}
+          />
           <button type="button" className="danger" onClick={() => controller.clearAll()}>
             清空
           </button>
@@ -113,6 +153,7 @@ export default function App() {
           onLayersChange={onLayersChange}
           onHistoryChange={onHistoryChange}
           onObjectCount={onObjectCount}
+          onProjectMeta={onProjectMeta}
           objectCount={objectCount}
         />
         <RightPanel selection={selection} layers={layers} selectedIds={selectedIds} />

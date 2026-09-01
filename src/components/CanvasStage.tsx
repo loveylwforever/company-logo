@@ -6,6 +6,7 @@ type Props = {
   onLayersChange: (layers: LayerInfo[]) => void
   onHistoryChange: (canUndo: boolean, canRedo: boolean) => void
   onObjectCount: (count: number) => void
+  onProjectMeta?: (meta: { name: string; fontId: string; paletteId: string }) => void
   objectCount: number
 }
 
@@ -23,6 +24,7 @@ export function CanvasStage({
   onLayersChange,
   onHistoryChange,
   onObjectCount,
+  onProjectMeta,
   objectCount,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -40,6 +42,7 @@ export function CanvasStage({
       onObjectCount,
       onZoomChange: setZoomPercent,
       onContextMenu: setCtxMenu,
+      onProjectMeta,
     })
 
     const fit = () => {
@@ -56,7 +59,7 @@ export function CanvasStage({
       ro.disconnect()
       controller.dispose()
     }
-  }, [onSelectionChange, onLayersChange, onHistoryChange, onObjectCount])
+  }, [onSelectionChange, onLayersChange, onHistoryChange, onObjectCount, onProjectMeta])
 
   useEffect(() => {
     if (!ctxMenu) return
@@ -154,6 +157,14 @@ export function CanvasStage({
             onClick={() => runMenu(() => controller.toggleLock())}
           >
             {ctxMenu.locked ? '解锁' : '锁定'}
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            disabled={layerDisabled || ctxMenu.isContainer || ctxMenu.locked}
+            onClick={() => runMenu(() => controller.fitToContainer())}
+          >
+            自适应容器
           </button>
           <div className="ctx-menu-sep" />
           <button
