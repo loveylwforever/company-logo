@@ -70,7 +70,7 @@ FabricObject.customProperties = [
 
 /** 默认 Logo 容器边长 */
 export const DEFAULT_CONTAINER_SIZE = 512
-export const CONTAINER_PRESETS = [512, 256, 128] as const
+export const CONTAINER_PRESETS = [1024, 512, 256, 128] as const
 
 const ROLE_CONTAINER = 'container'
 
@@ -1951,7 +1951,7 @@ export class LogoController {
   async exportIco(sizes: ExportSize[]) {
     const target = this.requireContainer()
     if (!target) return
-    // ICO 目录对 >256 支持有限，大尺寸请用 PNG（180/192/512）
+    // ICO 目录对 >256 支持有限，大尺寸请用 PNG（180/192/512/1024）
     const icoSizes = sizes.filter((s) => s <= 256)
     if (!icoSizes.length) {
       window.alert('ICO 请至少勾选一个 ≤256 的尺寸（推荐 16 / 32 / 48）')

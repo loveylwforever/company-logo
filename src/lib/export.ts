@@ -128,5 +128,6 @@ export const EXPORT_SIZES = [
   192, // Android / PWA
   256, // Windows / ICO 上限常用
   512, // PWA 启动图 / 商店
+  1024, // 高清商店图 / 大图导出
 ] as const
 export type ExportSize = (typeof EXPORT_SIZES)[number]

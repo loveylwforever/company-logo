@@ -21,7 +21,7 @@ const DEFAULT_OPEN: Record<SectionId, boolean> = {
 }
 
 export function RightPanel({ selection, layers, selectedIds }: Props) {
-  const [sizes, setSizes] = useState<ExportSize[]>([16, 32, 48, 180, 192, 512])
+  const [sizes, setSizes] = useState<ExportSize[]>([16, 32, 48, 180, 192, 512, 1024])
   const [busy, setBusy] = useState(false)
   const [open, setOpen] = useState(DEFAULT_OPEN)
 
@@ -609,6 +609,7 @@ function sizeHint(size: ExportSize): string {
     192: 'Android / PWA 图标',
     256: 'Windows 大图标 / ICO',
     512: 'PWA 启动图 / 商店',
+    1024: '高清商店图 / 大图导出',
   }
   return `${size}×${size} · ${hints[size] ?? '网站图标'}`
 }
