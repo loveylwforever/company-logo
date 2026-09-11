@@ -4,6 +4,7 @@ import {
   Group,
   IText,
   Path,
+  PencilBrush,
   Point,
   Rect,
   Shadow,
@@ -314,6 +315,7 @@ export class LogoController {
   private panMoveHandler: ((e: MouseEvent) => void) | null = null
   private static readonly PAN_THRESHOLD = 4
   private restoringProject = false
+  private isDrawingMode = false
 
   mount(el: HTMLCanvasElement, listeners: Listeners) {
     this.listeners = listeners
@@ -627,6 +629,7 @@ export class LogoController {
     this.lifecycleId++
     this.cancelScheduledSave()
     this.endRightButton()
+    if (this.isDrawingMode) this.stopDrawingMode()
     this.alignGuides?.clear()
     this.alignGuides = null
     this.gradientEditor?.clear()
@@ -869,6 +872,7 @@ export class LogoController {
     if (!this.canvas) return
     this.cancelScheduledSave()
     this.tearDownEditors()
+    if (this.isDrawingMode) this.stopDrawingMode()
     this.canvas.clear()
     this.canvas.backgroundColor = ''
     this.containerSeq = 0
@@ -955,6 +959,82 @@ export class LogoController {
       canvas.requestRenderAll()
       this.emitSelection()
     }
+  }
+
+  /** 进入自由绘制模式 */
+  startDrawingMode() {
+    const canvas = this.canvas
+    if (!canvas || this.isDrawingMode) return
+
+    // 退出路径编辑
+    this.pathEditor?.clear()
+    this.gradientEditor?.clear()
+    canvas.discardActiveObject()
+    
+    // 禁用右键平移，避免与绘制冲突
+    this.endRightButton()
+
+    // 配置画笔
+    const brush = new PencilBrush(canvas)
+    brush.color = this.currentShapeColor
+    brush.width = 3
+    brush.strokeLineCap = 'round'
+    brush.strokeLineJoin = 'round'
+    canvas.freeDrawingBrush = brush
+    canvas.isDrawingMode = true
+    canvas.selection = false
+    this.isDrawingMode = true
+
+    // 监听路径创建事件
+    canvas.on('path:created', this.onPathCreated)
+
+    canvas.requestRenderAll()
+  }
+
+  /** 退出自由绘制模式 */
+  stopDrawingMode() {
+    const canvas = this.canvas
+    if (!canvas || !this.isDrawingMode) return
+
+    canvas.isDrawingMode = false
+    canvas.selection = true
+    this.isDrawingMode = false
+
+    // 移除路径创建监听
+    canvas.off('path:created', this.onPathCreated)
+
+    canvas.requestRenderAll()
+  }
+
+  /** 获取当前是否处于绘制模式 */
+  get drawingMode(): boolean {
+    return this.isDrawingMode
+  }
+
+  /** 处理绘制的路径：添加元数据、简化路径、保存历史 */
+  private onPathCreated = (e: { path: Path }) => {
+    const canvas = this.canvas
+    if (!canvas) return
+
+    const path = e.path
+    
+    // 设置路径属性以匹配当前颜色和样式
+    path.set({
+      fill: '',
+      stroke: this.currentShapeColor,
+      strokeWidth: 3,
+      strokeLineCap: 'round',
+      strokeLineJoin: 'round',
+      objectCaching: false,
+    })
+
+    // 添加元数据
+    ;(path as MetaObject).__label = '手绘路径'
+    ensureId(path)
+
+    // 保存到历史
+    this.saveHistory()
+    this.emitAll()
   }
 
   /** 从用户选择的工程文件完整还原画布 */
@@ -1101,6 +1181,7 @@ export class LogoController {
   addShape(kind: ShapeKind, fill?: string) {
     if (!this.canvas) return
     this.pathEditor?.clear()
+    if (this.isDrawingMode) this.stopDrawingMode()
     const drop = this.dropCenter()
     const shapeCount = this.shapeObjects().length
     const useAccent = shapeCount > 0 && !drop.box
@@ -1138,6 +1219,7 @@ export class LogoController {
   addText(text: string, font?: FontOption) {
     if (!this.canvas) return
     this.pathEditor?.clear()
+    if (this.isDrawingMode) this.stopDrawingMode()
     const f = font || getFontOption(this.currentFontId)
     const drop = this.dropCenter()
     const fontSize = drop.box ? Math.max(28, Math.min(drop.box.w, drop.box.h) * 0.22) : 72
@@ -1473,6 +1555,10 @@ export class LogoController {
     if (!canvas || !this.pathEditor) return
     const obj = canvas.getActiveObject()
     if (!(obj instanceof Path) || isContainer(obj)) return
+    
+    // 退出绘制模式
+    if (this.isDrawingMode) this.stopDrawingMode()
+    
     this.gradientEditor?.clear()
     // 形状/旧路径进入编辑时同样补点：长边可拖、圆弧更均匀（已够密则几乎不变）
     this.densifyActivePath(obj)

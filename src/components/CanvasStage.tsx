@@ -32,6 +32,14 @@ export function CanvasStage({
   const menuRef = useRef<HTMLDivElement>(null)
   const [zoomPercent, setZoomPercent] = useState(100)
   const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null)
+  const [isDrawing, setIsDrawing] = useState(false)
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setIsDrawing(controller.drawingMode)
+    }, 100)
+    return () => clearInterval(interval)
+  }, [])
 
   useEffect(() => {
     if (!canvasRef.current) return
@@ -109,6 +117,11 @@ export function CanvasStage({
       {objectCount === 0 && (
         <div className="canvas-hint">
           左键框选 · 右键拖拽平移 · 右键菜单 · 滚轮缩放 · 导出前选中容器
+        </div>
+      )}
+      {isDrawing && (
+        <div className="canvas-hint" style={{ background: 'rgba(15, 110, 86, 0.9)', color: 'white' }}>
+          🎨 绘制模式：在画布上拖动鼠标自由绘制路径 · 完成后点击左侧「退出绘制模式」
         </div>
       )}
       {ctxMenu && menuPos && (
