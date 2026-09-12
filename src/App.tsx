@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'reac
 import { LeftPanel } from './components/LeftPanel'
 import { CanvasStage } from './components/CanvasStage'
 import { RightPanel } from './components/RightPanel'
-import { controller, type LayerInfo, type SelectionProps } from './lib/controller'
+import { controller, type LayerInfo, type SelectionProps, type DrawingState } from './lib/controller'
 import { DEFAULT_PALETTE_ID } from './lib/palettes'
 import './styles/app.css'
 
@@ -38,6 +38,7 @@ export default function App() {
   const [canUndo, setCanUndo] = useState(false)
   const [canRedo, setCanRedo] = useState(false)
   const [objectCount, setObjectCount] = useState(0)
+  const [drawingState, setDrawingState] = useState<DrawingState | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const onSelectionChange = useCallback((props: SelectionProps | null) => {
@@ -61,6 +62,10 @@ export default function App() {
     setName(meta.name)
     setFontId(meta.fontId)
     setPaletteId(meta.paletteId)
+  }, [])
+
+  const onDrawingStateChange = useCallback((state: DrawingState) => {
+    setDrawingState(state)
   }, [])
 
   useEffect(() => {
@@ -147,6 +152,7 @@ export default function App() {
           onFontChange={setFontId}
           paletteId={paletteId}
           onPaletteChange={setPaletteId}
+          drawingState={drawingState}
         />
         <CanvasStage
           onSelectionChange={onSelectionChange}
@@ -154,6 +160,7 @@ export default function App() {
           onHistoryChange={onHistoryChange}
           onObjectCount={onObjectCount}
           onProjectMeta={onProjectMeta}
+          onDrawingStateChange={onDrawingStateChange}
           objectCount={objectCount}
         />
         <RightPanel selection={selection} layers={layers} selectedIds={selectedIds} />
