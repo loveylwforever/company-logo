@@ -56,8 +56,10 @@ import {
 } from './project'
 import { prepareEditablePathData } from './pathPrepare'
 import { densifyPathCommands, pathCommandsToData, type PathCmd } from './pathResample'
+import { templatesForLetterCount, getTemplate, type LetterTemplate } from './letterTemplates'
 
 export type { FillMode } from './fills'
+export type { LetterTemplate } from './letterTemplates'
 
 export type BrushType = 'hard' | 'soft' | 'marker' | 'airbrush' | 'charcoal' | 'watercolor' | 'splatter'
 
@@ -1211,6 +1213,64 @@ export class LogoController {
     })
   }
 
+  /** 应用字母模板（带样式预设） */
+  async addLetterTemplate(templateId: string, text?: string) {
+    if (!this.canvas) return
+    this.exitDrawingMode()
+    this.pathEditor?.clear()
+
+    const template = getTemplate(templateId)
+    if (!template) return
+
+    const content = text || this.projectMeta.name || 'Logo'
+    const f = getFontOption(this.currentFontId)
+    const drop = this.dropCenter()
+    const fontSize = drop.box ? Math.max(32, Math.min(drop.box.w, drop.box.h) * 0.28) : 88
+
+    // 应用模板样式
+    const style = await template.applyStyle(
+      content,
+      this.currentFontId,
+      this.currentShapeColor,
+      this.currentAccentColor
+    )
+
+    const itext = new IText(content, {
+      left: drop.x,
+      top: drop.y,
+      originX: 'center',
+      originY: 'center',
+      fontFamily: f.cssFamily,
+      fontSize,
+      objectCaching: false,
+      lineHeight: 1,
+    })
+    
+    // 应用模板样式
+    if (style.fill) itext.set('fill', style.fill)
+    if (style.stroke) itext.set('stroke', style.stroke)
+    if (style.strokeWidth !== undefined) itext.set('strokeWidth', style.strokeWidth)
+    if (style.paintFirst) itext.set('paintFirst', style.paintFirst)
+    if (style.shadow) itext.set('shadow', style.shadow)
+    ;(itext as MetaObject).__fontId = f.id
+    ;(itext as MetaObject).__label = `${template.name}字母`
+    ensureId(itext)
+    this.canvas.add(itext)
+    this.canvas.setActiveObject(itext)
+    this.canvas.requestRenderAll()
+
+    void this.tightenTextBounds(itext).then(() => {
+      this.saveHistory()
+      this.emitAll()
+    })
+  }
+
+  /** 获取当前文本的推荐模板 */
+  getRecommendedTemplates(text?: string): LetterTemplate[] {
+    const content = text || this.projectMeta.name || 'Logo'
+    return templatesForLetterCount(content)
+  }
+
   /**
    * 用 opentype 实测字形墨水盒，改写 Fabric 默认行高，去掉底部（及顶部）多余留白。
    * 无下行字母时不再按整字身预留空白；有 g/y 时则按真实下行扩展，避免裁切。
@@ -1574,6 +1634,19 @@ export class LogoController {
 
   setPathBend(amount: number) {
     this.pathEditor?.setBendAmount(amount)
+    this.emitSelection()
+    this.scheduleSave()
+  }
+
+  /** 路径自动修正：拉直、对齐、网格吸附 */
+  autoCorrectPath(options?: {
+    straighten?: boolean
+    snapToGrid?: boolean
+    gridSize?: number
+    alignAnchors?: boolean
+    threshold?: number
+  }) {
+    this.pathEditor?.autoCorrect(options)
     this.emitSelection()
     this.scheduleSave()
   }

@@ -244,6 +244,32 @@ export function RightPanel({ selection, layers, selectedIds }: Props) {
                     曲线变形
                   </button>
                 </div>
+                <div className="path-correction-tools">
+                  <label className="field-label">路径修正</label>
+                  <div className="toolbar-group">
+                    <button
+                      type="button"
+                      title="自动拉直接近水平/垂直的线段"
+                      onClick={() => controller.autoCorrectPath({ straighten: true, alignAnchors: false })}
+                    >
+                      拉直
+                    </button>
+                    <button
+                      type="button"
+                      title="对齐附近的锚点到相同位置"
+                      onClick={() => controller.autoCorrectPath({ straighten: false, alignAnchors: true })}
+                    >
+                      对齐
+                    </button>
+                    <button
+                      type="button"
+                      title="一键修正：拉直 + 对齐"
+                      onClick={() => controller.autoCorrectPath({ straighten: true, alignAnchors: true })}
+                    >
+                      修正
+                    </button>
+                  </div>
+                </div>
                 {s.pathEditMode !== 'line' && (
                   <label className="path-bend-label">
                     <span>弯曲弧度</span>
