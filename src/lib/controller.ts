@@ -969,6 +969,9 @@ export class LogoController {
     const editing = this.pathEditor?.isEditing
     const path = this.pathEditor?.activePath
     const active = canvas.getActiveObject()
+    const wasDrawing = this.drawingState.isDrawing
+    
+    if (wasDrawing) this.exitDrawingMode()
     this.pathEditor?.clear()
     this.gradientEditor?.clear()
     this.alignGuides?.clear()
@@ -990,6 +993,7 @@ export class LogoController {
       } else if (active && canvas.getObjects().includes(active)) {
         canvas.setActiveObject(active)
       }
+      if (wasDrawing) this.enterDrawingMode()
       canvas.requestRenderAll()
       this.emitSelection()
     }
@@ -1903,6 +1907,11 @@ export class LogoController {
     const editing = this.pathEditor?.isEditing
     const path = this.pathEditor?.activePath
     const active = canvas.getActiveObject()
+    const wasDrawing = this.drawingState.isDrawing
+    
+    // 导出前退出绘制模式
+    if (wasDrawing) this.exitDrawingMode()
+    
     // Fabric toDataURL / toSVG 都会受 viewportTransform 影响；先回到 1:1
     const prevVpt = canvas.viewportTransform.slice() as [
       number,
@@ -1924,6 +1933,7 @@ export class LogoController {
       canvas.setViewportTransform(prevVpt)
       if (editing && path) this.pathEditor?.start(path)
       else if (active && canvas.getObjects().includes(active)) canvas.setActiveObject(active)
+      if (wasDrawing) this.enterDrawingMode()
       canvas.requestRenderAll()
       this.emitSelection()
     }
