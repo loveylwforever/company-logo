@@ -7,7 +7,7 @@ import {
   palettePreviewCss,
   type Palette,
 } from '../lib/palettes'
-import { controller, CONTAINER_PRESETS, type BrushType, type DrawingState } from '../lib/controller'
+import { controller, CONTAINER_PRESETS, type BrushType, type DrawingState, type LetterTemplate } from '../lib/controller'
 import { AccordionSection } from './AccordionSection'
 
 type Props = {
@@ -20,12 +20,13 @@ type Props = {
   drawingState: DrawingState | null
 }
 
-type SectionId = 'name' | 'drawing' | 'container' | 'shapes' | 'fonts' | 'palettes'
+type SectionId = 'name' | 'drawing' | 'container' | 'templates' | 'shapes' | 'fonts' | 'palettes'
 
 const DEFAULT_OPEN: Record<SectionId, boolean> = {
   name: true,
-  drawing: true,
+  drawing: false,
   container: true,
+  templates: true,
   shapes: true,
   fonts: true,
   palettes: true,
@@ -312,6 +313,17 @@ export function LeftPanel({
       </AccordionSection>
 
       <AccordionSection
+        title="字母模板"
+        open={open.templates}
+        onToggle={() => toggle('templates')}
+      >
+        <div className="letter-templates-section">
+          <p className="muted">根据名称字数推荐的商业级样式模板</p>
+          <TemplateButtons text={name} />
+        </div>
+      </AccordionSection>
+
+      <AccordionSection
         title="形状模板"
         open={open.shapes}
         onToggle={() => toggle('shapes')}
@@ -427,5 +439,50 @@ function PaletteButton({
         )}
       </span>
     </button>
+  )
+}
+
+function TemplateButtons({ text }: { text: string }) {
+  const [templates, setTemplates] = useState<LetterTemplate[]>([])
+  
+  // 更新推荐模板
+  const updateTemplates = () => {
+    const recommended = controller.getRecommendedTemplates(text || 'Logo')
+    setTemplates(recommended)
+  }
+  
+  // 首次加载和文本变化时更新
+  useState(() => {
+    updateTemplates()
+  })
+  
+  if (templates.length === 0) {
+    updateTemplates()
+  }
+  
+  const letterCount = (text || 'Logo').trim().length
+  const countLabel = 
+    letterCount === 1 ? '单字母' :
+    letterCount === 2 ? '双字母' :
+    letterCount === 3 ? '三字母' : '多字母'
+  
+  return (
+    <div className="template-list">
+      <div className="template-count-label">{countLabel}模板（{templates.length}）</div>
+      <div className="grid-2">
+        {templates.map((template) => (
+          <button
+            key={template.id}
+            type="button"
+            className="template-btn"
+            title={template.description}
+            onClick={() => controller.addLetterTemplate(template.id, text)}
+          >
+            <span className="template-name">{template.name}</span>
+            <span className="template-desc muted">{template.description}</span>
+          </button>
+        ))}
+      </div>
+    </div>
   )
 }

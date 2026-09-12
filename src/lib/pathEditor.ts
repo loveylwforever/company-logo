@@ -26,6 +26,7 @@ import {
   type PathPointRef,
   type Pt,
 } from './pathSegment'
+import { autoCorrectPath } from './pathCorrection'
 
 export type PathEditMode = 'line' | 'curve'
 
@@ -688,5 +689,21 @@ export class PathEditor {
     const max = Math.max(20, Math.round(dist(p0, p3) * 0.85))
     const value = bulgeFromHandles(p0, pt(cmd, 1), pt(cmd, 3), p3)
     return { min: -max, max, value: Math.round(value * 10) / 10 }
+  }
+
+  /** 自动修正路径：拉直、对齐、网格吸附 */
+  autoCorrect(options?: {
+    straighten?: boolean
+    snapToGrid?: boolean
+    gridSize?: number
+    alignAnchors?: boolean
+    threshold?: number
+  }) {
+    if (!this.target) return
+    const live = this.target.path as unknown as PathCmd[]
+    const corrected = autoCorrectPath(live, options)
+    applyPathCommands(this.target, corrected)
+    this.rebuildAnchors()
+    this.onChange?.()
   }
 }
