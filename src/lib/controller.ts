@@ -665,6 +665,7 @@ export class LogoController {
     this.lifecycleId++
     this.cancelScheduledSave()
     this.endRightButton()
+    if (this.drawingState.isDrawing) this.exitDrawingMode()
     this.alignGuides?.clear()
     this.alignGuides = null
     this.gradientEditor?.clear()
@@ -907,6 +908,7 @@ export class LogoController {
     if (!this.canvas) return
     this.cancelScheduledSave()
     this.tearDownEditors()
+    if (this.drawingState.isDrawing) this.exitDrawingMode()
     this.canvas.clear()
     this.canvas.backgroundColor = ''
     this.containerSeq = 0
@@ -1519,6 +1521,10 @@ export class LogoController {
     this.exitDrawingMode()
     const obj = canvas.getActiveObject()
     if (!(obj instanceof Path) || isContainer(obj)) return
+    
+    // 退出绘制模式
+    if (this.drawingState.isDrawing) this.exitDrawingMode()
+    
     this.gradientEditor?.clear()
     // 形状/旧路径进入编辑时同样补点：长边可拖、圆弧更均匀（已够密则几乎不变）
     this.densifyActivePath(obj)
