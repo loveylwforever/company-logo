@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { SHAPE_META, type ShapeKind } from '../lib/shapes'
 import { FONT_GROUPS, fontsInGroup } from '../lib/fonts'
 import {
@@ -7,7 +7,7 @@ import {
   palettePreviewCss,
   type Palette,
 } from '../lib/palettes'
-import { controller, CONTAINER_PRESETS } from '../lib/controller'
+import { controller, CONTAINER_PRESETS, type BrushType, type DrawingState } from '../lib/controller'
 import { AccordionSection } from './AccordionSection'
 
 type Props = {
@@ -17,14 +17,15 @@ type Props = {
   onFontChange: (id: string) => void
   paletteId: string
   onPaletteChange: (id: string) => void
+  drawingState: DrawingState | null
 }
 
-type SectionId = 'name' | 'container' | 'draw' | 'shapes' | 'fonts' | 'palettes'
+type SectionId = 'name' | 'drawing' | 'container' | 'shapes' | 'fonts' | 'palettes'
 
 const DEFAULT_OPEN: Record<SectionId, boolean> = {
   name: true,
+  drawing: true,
   container: true,
-  draw: true,
   shapes: true,
   fonts: true,
   palettes: true,
@@ -70,6 +71,16 @@ function ShapeIcon({ kind }: { kind: ShapeKind }) {
   )
 }
 
+const BRUSH_META: Array<{ type: BrushType; label: string; desc: string }> = [
+  { type: 'hard', label: '硬笔', desc: '清晰锐利的线条' },
+  { type: 'soft', label: '软笔刷', desc: '柔和边缘' },
+  { type: 'marker', label: '马克笔', desc: '方头半透明' },
+  { type: 'airbrush', label: '喷枪', desc: '细腻喷涂' },
+  { type: 'charcoal', label: '炭笔', desc: '粗糙质感' },
+  { type: 'watercolor', label: '水彩', desc: '透明重叠' },
+  { type: 'splatter', label: '喷溅', desc: '随机飞溅' },
+]
+
 export function LeftPanel({
   name,
   onNameChange,
@@ -77,30 +88,22 @@ export function LeftPanel({
   onFontChange,
   paletteId,
   onPaletteChange,
+  drawingState,
 }: Props) {
   const [open, setOpen] = useState(DEFAULT_OPEN)
-  const [isDrawing, setIsDrawing] = useState(false)
-
-  // Sync drawing mode state
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setIsDrawing(controller.drawingMode)
-    }, 100)
-    return () => clearInterval(interval)
-  }, [])
-
   const toggle = (id: SectionId) => {
     setOpen((prev) => ({ ...prev, [id]: !prev[id] }))
   }
 
-  const toggleDrawing = () => {
-    if (controller.drawingMode) {
-      controller.stopDrawingMode()
-      setIsDrawing(false)
-    } else {
-      controller.startDrawingMode()
-      setIsDrawing(true)
-    }
+  const isDrawing = drawingState?.isDrawing ?? false
+  const settings = drawingState?.settings ?? {
+    type: 'hard' as BrushType,
+    width: 4,
+    color: '#000000',
+    opacity: 1,
+    hardness: 80,
+    lineCap: 'round' as const,
+    lineJoin: 'round' as const,
   }
 
   return (
@@ -128,6 +131,163 @@ export function LeftPanel({
       </AccordionSection>
 
       <AccordionSection
+        title="自由绘制"
+        open={open.drawing}
+        onToggle={() => toggle('drawing')}
+      >
+        <div className="drawing-mode-section">
+          <button
+            type="button"
+            className={`drawing-toggle${isDrawing ? ' active' : ''}`}
+            onClick={() => controller.toggleDrawingMode()}
+          >
+            {isDrawing ? '● 绘制中 - 点击退出' : '开始自由绘制'}
+          </button>
+
+          {isDrawing && (
+            <>
+              <div className="brush-presets">
+                <label className="field-label">笔刷类型</label>
+                <div className="grid-2">
+                  {BRUSH_META.map((b) => (
+                    <button
+                      key={b.type}
+                      type="button"
+                      className={`brush-preset-btn${settings.type === b.type ? ' active' : ''}`}
+                      title={b.desc}
+                      onClick={() => controller.setBrushType(b.type)}
+                    >
+                      {b.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="brush-controls">
+                <div className="field">
+                  <label>粗细: {settings.width}px</label>
+                  <input
+                    type="range"
+                    min={1}
+                    max={50}
+                    step={1}
+                    value={settings.width}
+                    onChange={(e) => controller.updateBrushSettings({ width: Number(e.target.value) })}
+                  />
+                </div>
+
+                <div className="field">
+                  <label>颜色</label>
+                  <input
+                    type="color"
+                    value={settings.color}
+                    onChange={(e) => controller.updateBrushSettings({ color: e.target.value })}
+                  />
+                </div>
+
+                <div className="field">
+                  <label>不透明度: {Math.round(settings.opacity * 100)}%</label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={settings.opacity}
+                    onChange={(e) => controller.updateBrushSettings({ opacity: Number(e.target.value) })}
+                  />
+                </div>
+
+                <div className="field">
+                  <label>硬度: {settings.hardness}%</label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    step={5}
+                    value={settings.hardness}
+                    onChange={(e) => controller.updateBrushSettings({ hardness: Number(e.target.value) })}
+                  />
+                </div>
+
+                <div className="field">
+                  <label>线条端点</label>
+                  <div className="toolbar-group">
+                    <button
+                      type="button"
+                      className={settings.lineCap === 'butt' ? 'active' : ''}
+                      onClick={() => controller.updateBrushSettings({ lineCap: 'butt' })}
+                      title="方形端点"
+                    >
+                      方
+                    </button>
+                    <button
+                      type="button"
+                      className={settings.lineCap === 'round' ? 'active' : ''}
+                      onClick={() => controller.updateBrushSettings({ lineCap: 'round' })}
+                      title="圆形端点"
+                    >
+                      圆
+                    </button>
+                    <button
+                      type="button"
+                      className={settings.lineCap === 'square' ? 'active' : ''}
+                      onClick={() => controller.updateBrushSettings({ lineCap: 'square' })}
+                      title="方形延伸"
+                    >
+                      延
+                    </button>
+                  </div>
+                </div>
+
+                <div className="field">
+                  <label>线条连接</label>
+                  <div className="toolbar-group">
+                    <button
+                      type="button"
+                      className={settings.lineJoin === 'miter' ? 'active' : ''}
+                      onClick={() => controller.updateBrushSettings({ lineJoin: 'miter' })}
+                      title="尖角连接"
+                    >
+                      尖
+                    </button>
+                    <button
+                      type="button"
+                      className={settings.lineJoin === 'round' ? 'active' : ''}
+                      onClick={() => controller.updateBrushSettings({ lineJoin: 'round' })}
+                      title="圆角连接"
+                    >
+                      圆
+                    </button>
+                    <button
+                      type="button"
+                      className={settings.lineJoin === 'bevel' ? 'active' : ''}
+                      onClick={() => controller.updateBrushSettings({ lineJoin: 'bevel' })}
+                      title="斜角连接"
+                    >
+                      斜
+                    </button>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  className={`eraser-btn${drawingState?.isErasing ? ' active' : ''}`}
+                  onClick={() => controller.toggleEraser()}
+                >
+                  {drawingState?.isErasing ? '● 橡皮擦中' : '橡皮擦'}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+        <p className="muted">
+          {isDrawing
+            ? '拖动鼠标自由绘制；选择不同笔刷体验多样质感；橡皮擦可擦除笔画'
+            : '进入后可用多种笔刷自由涂鸦，绘制独特图形'}
+        </p>
+      </AccordionSection>
+
+      <AccordionSection
         title="Logo 容器"
         open={open.container}
         onToggle={() => toggle('container')}
@@ -149,42 +309,6 @@ export function LeftPanel({
           </button>
         </div>
         <p className="muted">导出必须以选中的容器为准</p>
-      </AccordionSection>
-
-      <AccordionSection
-        title="自由绘制"
-        open={open.draw}
-        onToggle={() => toggle('draw')}
-      >
-        <button
-          type="button"
-          className={`primary${isDrawing ? ' active' : ''}`}
-          style={{ width: '100%', marginBottom: '0.5rem' }}
-          onClick={toggleDrawing}
-        >
-          <svg 
-            viewBox="0 0 24 24" 
-            width="20" 
-            height="20" 
-            style={{ marginRight: '0.5rem', verticalAlign: 'middle' }}
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <path d="M12 19l7-7 3 3-7 7-3-3z" />
-            <path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z" />
-            <path d="M2 2l7.586 7.586" />
-            <circle cx="11" cy="11" r="2" />
-          </svg>
-          {isDrawing ? '退出绘制模式' : '开始自由绘制'}
-        </button>
-        <p className="muted">
-          {isDrawing 
-            ? '用鼠标或触控笔在画布上绘制自定义路径。再次点击退出绘制模式。'
-            : '点击按钮进入绘制模式，随心所欲地画出独特轮廓。绘制的路径可编辑、导出。'}
-        </p>
       </AccordionSection>
 
       <AccordionSection

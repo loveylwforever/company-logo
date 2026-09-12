@@ -4,10 +4,13 @@ import {
   Group,
   IText,
   Path,
-  PencilBrush,
   Point,
   Rect,
   Shadow,
+  PencilBrush,
+  CircleBrush,
+  SprayBrush,
+  BaseBrush,
   type FabricObjectProps,
 } from 'fabric'
 import { textToPathData, getFontOption, type FontOption, loadOpentypeFont, measureGlyphInk, fabricTextMetricsFromInk } from './fonts'
@@ -55,6 +58,25 @@ import { prepareEditablePathData } from './pathPrepare'
 import { densifyPathCommands, pathCommandsToData, type PathCmd } from './pathResample'
 
 export type { FillMode } from './fills'
+
+export type BrushType = 'hard' | 'soft' | 'marker' | 'airbrush' | 'charcoal' | 'watercolor' | 'splatter'
+
+export type BrushSettings = {
+  type: BrushType
+  width: number
+  color: string
+  opacity: number
+  /** 0-100: hardness/blur amount for applicable brushes */
+  hardness: number
+  lineCap: 'butt' | 'round' | 'square'
+  lineJoin: 'miter' | 'round' | 'bevel'
+}
+
+export type DrawingState = {
+  isDrawing: boolean
+  isErasing: boolean
+  settings: BrushSettings
+}
 
 /** 持久化自定义元数据，保证撤销后容器仍可识别 */
 FabricObject.customProperties = [
@@ -127,6 +149,7 @@ type Listeners = {
   onContextMenu?: (menu: ContextMenuState | null) => void
   /** 导入/自动恢复工程后同步左侧 name / 字体 / 配色 */
   onProjectMeta?: (meta: ProjectMetaInput) => void
+  onDrawingStateChange?: (state: DrawingState) => void
 }
 
 export type ContextMenuState = {
@@ -315,7 +338,20 @@ export class LogoController {
   private panMoveHandler: ((e: MouseEvent) => void) | null = null
   private static readonly PAN_THRESHOLD = 4
   private restoringProject = false
-  private isDrawingMode = false
+  private drawingState: DrawingState = {
+    isDrawing: false,
+    isErasing: false,
+    settings: {
+      type: 'hard',
+      width: 4,
+      color: '#000000',
+      opacity: 1,
+      hardness: 80,
+      lineCap: 'round',
+      lineJoin: 'round',
+    },
+  }
+  private pathCounter = 0
 
   mount(el: HTMLCanvasElement, listeners: Listeners) {
     this.listeners = listeners
@@ -629,7 +665,7 @@ export class LogoController {
     this.lifecycleId++
     this.cancelScheduledSave()
     this.endRightButton()
-    if (this.isDrawingMode) this.stopDrawingMode()
+    if (this.drawingState.isDrawing) this.exitDrawingMode()
     this.alignGuides?.clear()
     this.alignGuides = null
     this.gradientEditor?.clear()
@@ -872,7 +908,7 @@ export class LogoController {
     if (!this.canvas) return
     this.cancelScheduledSave()
     this.tearDownEditors()
-    if (this.isDrawingMode) this.stopDrawingMode()
+    if (this.drawingState.isDrawing) this.exitDrawingMode()
     this.canvas.clear()
     this.canvas.backgroundColor = ''
     this.containerSeq = 0
@@ -935,6 +971,9 @@ export class LogoController {
     const editing = this.pathEditor?.isEditing
     const path = this.pathEditor?.activePath
     const active = canvas.getActiveObject()
+    const wasDrawing = this.drawingState.isDrawing
+    
+    if (wasDrawing) this.exitDrawingMode()
     this.pathEditor?.clear()
     this.gradientEditor?.clear()
     this.alignGuides?.clear()
@@ -956,85 +995,10 @@ export class LogoController {
       } else if (active && canvas.getObjects().includes(active)) {
         canvas.setActiveObject(active)
       }
+      if (wasDrawing) this.enterDrawingMode()
       canvas.requestRenderAll()
       this.emitSelection()
     }
-  }
-
-  /** 进入自由绘制模式 */
-  startDrawingMode() {
-    const canvas = this.canvas
-    if (!canvas || this.isDrawingMode) return
-
-    // 退出路径编辑
-    this.pathEditor?.clear()
-    this.gradientEditor?.clear()
-    canvas.discardActiveObject()
-    
-    // 禁用右键平移，避免与绘制冲突
-    this.endRightButton()
-
-    // 配置画笔
-    const brush = new PencilBrush(canvas)
-    brush.color = this.currentShapeColor
-    brush.width = 3
-    brush.strokeLineCap = 'round'
-    brush.strokeLineJoin = 'round'
-    canvas.freeDrawingBrush = brush
-    canvas.isDrawingMode = true
-    canvas.selection = false
-    this.isDrawingMode = true
-
-    // 监听路径创建事件
-    canvas.on('path:created', this.onPathCreated)
-
-    canvas.requestRenderAll()
-  }
-
-  /** 退出自由绘制模式 */
-  stopDrawingMode() {
-    const canvas = this.canvas
-    if (!canvas || !this.isDrawingMode) return
-
-    canvas.isDrawingMode = false
-    canvas.selection = true
-    this.isDrawingMode = false
-
-    // 移除路径创建监听
-    canvas.off('path:created', this.onPathCreated)
-
-    canvas.requestRenderAll()
-  }
-
-  /** 获取当前是否处于绘制模式 */
-  get drawingMode(): boolean {
-    return this.isDrawingMode
-  }
-
-  /** 处理绘制的路径：添加元数据、简化路径、保存历史 */
-  private onPathCreated = (e: { path: Path }) => {
-    const canvas = this.canvas
-    if (!canvas) return
-
-    const path = e.path
-    
-    // 设置路径属性以匹配当前颜色和样式
-    path.set({
-      fill: '',
-      stroke: this.currentShapeColor,
-      strokeWidth: 3,
-      strokeLineCap: 'round',
-      strokeLineJoin: 'round',
-      objectCaching: false,
-    })
-
-    // 添加元数据
-    ;(path as MetaObject).__label = '手绘路径'
-    ensureId(path)
-
-    // 保存到历史
-    this.saveHistory()
-    this.emitAll()
   }
 
   /** 从用户选择的工程文件完整还原画布 */
@@ -1146,6 +1110,7 @@ export class LogoController {
   /** 添加可导出的 Logo 容器 */
   addContainer(size: number = DEFAULT_CONTAINER_SIZE) {
     if (!this.canvas) return
+    this.exitDrawingMode()
     this.pathEditor?.clear()
     this.containerSeq += 1
     const n = this.containerObjects().length
@@ -1180,8 +1145,8 @@ export class LogoController {
 
   addShape(kind: ShapeKind, fill?: string) {
     if (!this.canvas) return
+    this.exitDrawingMode()
     this.pathEditor?.clear()
-    if (this.isDrawingMode) this.stopDrawingMode()
     const drop = this.dropCenter()
     const shapeCount = this.shapeObjects().length
     const useAccent = shapeCount > 0 && !drop.box
@@ -1218,8 +1183,8 @@ export class LogoController {
 
   addText(text: string, font?: FontOption) {
     if (!this.canvas) return
+    this.exitDrawingMode()
     this.pathEditor?.clear()
-    if (this.isDrawingMode) this.stopDrawingMode()
     const f = font || getFontOption(this.currentFontId)
     const drop = this.dropCenter()
     const fontSize = drop.box ? Math.max(28, Math.min(drop.box.w, drop.box.h) * 0.22) : 72
@@ -1553,11 +1518,12 @@ export class LogoController {
   startPathEdit() {
     const canvas = this.canvas
     if (!canvas || !this.pathEditor) return
+    this.exitDrawingMode()
     const obj = canvas.getActiveObject()
     if (!(obj instanceof Path) || isContainer(obj)) return
     
     // 退出绘制模式
-    if (this.isDrawingMode) this.stopDrawingMode()
+    if (this.drawingState.isDrawing) this.exitDrawingMode()
     
     this.gradientEditor?.clear()
     // 形状/旧路径进入编辑时同样补点：长边可拖、圆弧更均匀（已够密则几乎不变）
@@ -1947,6 +1913,11 @@ export class LogoController {
     const editing = this.pathEditor?.isEditing
     const path = this.pathEditor?.activePath
     const active = canvas.getActiveObject()
+    const wasDrawing = this.drawingState.isDrawing
+    
+    // 导出前退出绘制模式
+    if (wasDrawing) this.exitDrawingMode()
+    
     // Fabric toDataURL / toSVG 都会受 viewportTransform 影响；先回到 1:1
     const prevVpt = canvas.viewportTransform.slice() as [
       number,
@@ -1968,6 +1939,7 @@ export class LogoController {
       canvas.setViewportTransform(prevVpt)
       if (editing && path) this.pathEditor?.start(path)
       else if (active && canvas.getObjects().includes(active)) canvas.setActiveObject(active)
+      if (wasDrawing) this.enterDrawingMode()
       canvas.requestRenderAll()
       this.emitSelection()
     }
@@ -2050,6 +2022,220 @@ export class LogoController {
       }))
       downloadBlob(encodeIco(pngs), 'logo.ico')
     })
+  }
+
+  /** 创建适合当前笔刷类型的 Fabric brush 实例 */
+  private createBrush(settings: BrushSettings): BaseBrush {
+    const canvas = this.canvas!
+    let brush: BaseBrush
+
+    switch (settings.type) {
+      case 'soft': {
+        // 软笔刷：使用 CircleBrush 实现柔和边缘
+        const circleBrush = new CircleBrush(canvas)
+        circleBrush.width = settings.width
+        brush = circleBrush
+        break
+      }
+      case 'airbrush':
+      case 'splatter': {
+        // 喷枪/喷溅：使用 SprayBrush
+        const sprayBrush = new SprayBrush(canvas)
+        sprayBrush.width = settings.width
+        sprayBrush.density = settings.type === 'splatter' ? 15 : 20
+        sprayBrush.dotWidth = settings.type === 'splatter' ? 3 : 1
+        sprayBrush.randomOpacity = settings.type === 'splatter'
+        brush = sprayBrush
+        break
+      }
+      case 'charcoal': {
+        // 炭笔：SprayBrush 配置为稀疏、大点
+        const sprayBrush = new SprayBrush(canvas)
+        sprayBrush.width = settings.width * 1.5
+        sprayBrush.density = 8
+        sprayBrush.dotWidth = 2
+        sprayBrush.randomOpacity = true
+        brush = sprayBrush
+        break
+      }
+      case 'watercolor': {
+        // 水彩：CircleBrush 配置为透明、重叠混合
+        const circleBrush = new CircleBrush(canvas)
+        circleBrush.width = settings.width * 2
+        brush = circleBrush
+        break
+      }
+      case 'marker':
+      case 'hard':
+      default: {
+        // 硬笔/马克笔：使用 PencilBrush
+        const pencilBrush = new PencilBrush(canvas)
+        pencilBrush.width = settings.width
+        pencilBrush.strokeLineCap = settings.type === 'marker' ? 'square' : settings.lineCap
+        pencilBrush.strokeLineJoin = settings.lineJoin
+        // 马克笔稍宽、半透明
+        if (settings.type === 'marker') {
+          pencilBrush.width = settings.width * 1.2
+        }
+        brush = pencilBrush
+      }
+    }
+
+    // 统一应用颜色和透明度
+    const opacity = settings.type === 'marker' ? Math.min(settings.opacity, 0.75) : 
+                    settings.type === 'watercolor' ? Math.min(settings.opacity, 0.6) :
+                    settings.opacity
+    const rgba = this.hexToRgba(settings.color, opacity)
+    brush.color = rgba
+
+    return brush
+  }
+
+  private hexToRgba(hex: string, opacity: number): string {
+    const r = parseInt(hex.slice(1, 3), 16)
+    const g = parseInt(hex.slice(3, 5), 16)
+    const b = parseInt(hex.slice(5, 7), 16)
+    return `rgba(${r}, ${g}, ${b}, ${opacity})`
+  }
+
+  /** 进入自由绘制模式 */
+  enterDrawingMode() {
+    const canvas = this.canvas
+    if (!canvas) return
+
+    // 退出其他编辑模式
+    this.pathEditor?.clear()
+    this.gradientEditor?.clear()
+    canvas.discardActiveObject()
+    canvas.requestRenderAll()
+
+    // 启用绘制模式
+    canvas.isDrawingMode = true
+    this.drawingState.isDrawing = true
+    this.drawingState.isErasing = false
+
+    // 创建并设置画笔
+    canvas.freeDrawingBrush = this.createBrush(this.drawingState.settings)
+
+    // 监听绘制完成事件
+    const onPathCreated = (e: { path: Path }) => {
+      this.pathCounter += 1
+      const path = e.path as MetaObject
+      path.__label = `手绘路径${this.pathCounter}`
+      ensureId(path)
+      this.scheduleSave()
+      this.emitLayers()
+      this.emitCount()
+    }
+    canvas.on('path:created', onPathCreated)
+
+    this.emitDrawingState()
+  }
+
+  /** 退出自由绘制模式 */
+  exitDrawingMode() {
+    const canvas = this.canvas
+    if (!canvas) return
+
+    canvas.isDrawingMode = false
+    this.drawingState.isDrawing = false
+    this.drawingState.isErasing = false
+    canvas.defaultCursor = 'default'
+    canvas.hoverCursor = 'move'
+    canvas.off('path:created')
+    
+    // 清理橡皮擦事件
+    const handler = (canvas as any).__eraserHandler
+    if (handler) {
+      canvas.off('mouse:down', handler)
+      delete (canvas as any).__eraserHandler
+    }
+    
+    canvas.requestRenderAll()
+
+    this.emitDrawingState()
+  }
+
+  /** 切换自由绘制模式 */
+  toggleDrawingMode() {
+    if (this.drawingState.isDrawing) {
+      this.exitDrawingMode()
+    } else {
+      this.enterDrawingMode()
+    }
+  }
+
+  /** 更新笔刷类型 */
+  setBrushType(type: BrushType) {
+    this.drawingState.settings.type = type
+    if (this.drawingState.isDrawing && !this.drawingState.isErasing && this.canvas) {
+      this.canvas.freeDrawingBrush = this.createBrush(this.drawingState.settings)
+    }
+    this.emitDrawingState()
+  }
+
+  /** 更新笔刷设置 */
+  updateBrushSettings(partial: Partial<BrushSettings>) {
+    this.drawingState.settings = { ...this.drawingState.settings, ...partial }
+    if (this.drawingState.isDrawing && !this.drawingState.isErasing && this.canvas) {
+      this.canvas.freeDrawingBrush = this.createBrush(this.drawingState.settings)
+    }
+    this.emitDrawingState()
+  }
+
+  /** 切换橡皮擦模式 */
+  toggleEraser() {
+    const canvas = this.canvas
+    if (!canvas || !this.drawingState.isDrawing) return
+
+    this.drawingState.isErasing = !this.drawingState.isErasing
+
+    if (this.drawingState.isErasing) {
+      // 橡皮擦模式：退出绘图模式，启用点击删除
+      canvas.isDrawingMode = false
+      canvas.defaultCursor = 'crosshair'
+      canvas.hoverCursor = 'crosshair'
+      
+      // 监听点击事件删除对象
+      const onEraserClick = (opt: { target?: FabricObject }) => {
+        if (!opt.target || isOverlayObject(opt.target) || isContainer(opt.target)) return
+        // 只擦除手绘路径
+        const label = (opt.target as MetaObject).__label
+        if (label && label.startsWith('手绘路径')) {
+          canvas.remove(opt.target)
+          this.scheduleSave()
+          this.emitLayers()
+          this.emitCount()
+        }
+      }
+      canvas.on('mouse:down', onEraserClick)
+      // 存储处理器以便后续清理
+      ;(canvas as any).__eraserHandler = onEraserClick
+    } else {
+      // 恢复正常画笔模式
+      canvas.isDrawingMode = true
+      canvas.defaultCursor = 'default'
+      canvas.hoverCursor = 'move'
+      canvas.freeDrawingBrush = this.createBrush(this.drawingState.settings)
+      
+      // 移除橡皮擦事件
+      const handler = (canvas as any).__eraserHandler
+      if (handler) {
+        canvas.off('mouse:down', handler)
+        delete (canvas as any).__eraserHandler
+      }
+    }
+
+    this.emitDrawingState()
+  }
+
+  /** 获取当前绘制状态 */
+  getDrawingState(): DrawingState {
+    return { ...this.drawingState, settings: { ...this.drawingState.settings } }
+  }
+
+  private emitDrawingState() {
+    this.listeners?.onDrawingStateChange?.(this.getDrawingState())
   }
 }
 

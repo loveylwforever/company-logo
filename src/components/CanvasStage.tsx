@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { controller, type ContextMenuState, type LayerInfo, type SelectionProps } from '../lib/controller'
+import { controller, type ContextMenuState, type DrawingState, type LayerInfo, type SelectionProps } from '../lib/controller'
 
 type Props = {
   onSelectionChange: (props: SelectionProps | null) => void
@@ -7,6 +7,7 @@ type Props = {
   onHistoryChange: (canUndo: boolean, canRedo: boolean) => void
   onObjectCount: (count: number) => void
   onProjectMeta?: (meta: { name: string; fontId: string; paletteId: string }) => void
+  onDrawingStateChange?: (state: DrawingState) => void
   objectCount: number
 }
 
@@ -25,6 +26,7 @@ export function CanvasStage({
   onHistoryChange,
   onObjectCount,
   onProjectMeta,
+  onDrawingStateChange,
   objectCount,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -32,14 +34,6 @@ export function CanvasStage({
   const menuRef = useRef<HTMLDivElement>(null)
   const [zoomPercent, setZoomPercent] = useState(100)
   const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null)
-  const [isDrawing, setIsDrawing] = useState(false)
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setIsDrawing(controller.drawingMode)
-    }, 100)
-    return () => clearInterval(interval)
-  }, [])
 
   useEffect(() => {
     if (!canvasRef.current) return
@@ -51,6 +45,7 @@ export function CanvasStage({
       onZoomChange: setZoomPercent,
       onContextMenu: setCtxMenu,
       onProjectMeta,
+      onDrawingStateChange,
     })
 
     const fit = () => {
@@ -67,7 +62,7 @@ export function CanvasStage({
       ro.disconnect()
       controller.dispose()
     }
-  }, [onSelectionChange, onLayersChange, onHistoryChange, onObjectCount, onProjectMeta])
+  }, [onSelectionChange, onLayersChange, onHistoryChange, onObjectCount, onProjectMeta, onDrawingStateChange])
 
   useEffect(() => {
     if (!ctxMenu) return
@@ -117,11 +112,6 @@ export function CanvasStage({
       {objectCount === 0 && (
         <div className="canvas-hint">
           左键框选 · 右键拖拽平移 · 右键菜单 · 滚轮缩放 · 导出前选中容器
-        </div>
-      )}
-      {isDrawing && (
-        <div className="canvas-hint" style={{ background: 'rgba(15, 110, 86, 0.9)', color: 'white' }}>
-          🎨 绘制模式：在画布上拖动鼠标自由绘制路径 · 完成后点击左侧「退出绘制模式」
         </div>
       )}
       {ctxMenu && menuPos && (
